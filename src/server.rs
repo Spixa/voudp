@@ -22,6 +22,7 @@ struct Remote {
     last_active: Instant,
     channel_id: u32,
     addr: SocketAddr,
+    mask: Option<String>,
 }
 
 impl Remote {
@@ -34,7 +35,12 @@ impl Remote {
             last_active: Instant::now(),
             channel_id: 0,
             addr,
+            mask: None,
         })
+    }
+
+    fn mask(&mut self, mask: &str) {
+        self.mask = Some(String::from(mask));
     }
 }
 
@@ -64,53 +70,6 @@ impl Channel {
         self.remotes.retain(|c| c.lock().unwrap().addr != *addr);
         self.buffers.remove(addr);
     }
-
-    // old channel mix logic:
-    // fn mix(&mut self) {
-    //     // reset
-    //     let mut mix = vec![0.0; FRAME_SIZE];
-    //     let mut active_remotes = 0;
-
-    //     // mix audio (literally sum the samples)
-    //     for (_addr, buf) in &self.buffers {
-    //         if !mixer::is_silent(buf) {
-    //             active_remotes += 1;
-    //             for (i, sample) in buf.iter().enumerate() {
-    //                 mix[i] += sample;
-    //             }
-    //         }
-    //     }
-
-    //     if active_remotes == 0 {
-    //         return; // No audio to process
-    //     }
-
-    //     mixer::normalize(&mut mix);
-    //     mixer::soft_clip(&mut mix);
-    //     // other modules ...
-
-    //     for remote in &self.remotes {
-    //         let mut remote = remote.lock().unwrap();
-
-    //         if let std::result::Result::Ok(encoded) = remote.encoder.encode_vec_float(&mix, 960) {
-    //             // create audio packet: [0x02] + encoded audio
-    //             let mut packet = vec![0x02];
-    //             packet.extend_from_slice(&encoded);
-
-    //             // send to remote
-    //             if let Err(e) = remote.socket.send_to(&packet, remote.addr) {
-    //                 eprintln!("Failed to send audio to {}: {}", remote.addr, e);
-    //             }
-    //         }
-    //     }
-
-    //     // reset buffers for next frame
-    //     for buffer in self.buffers.values_mut() {
-    //         for sample in buffer.iter_mut() {
-    //             *sample = 0.0;
-    //         }
-    //     }
-    // }
 
     fn mix(&mut self, socket: &UdpSocket) {
         // in the new implementation, each remote gets their unique mixed audio, without their own voice
@@ -192,6 +151,7 @@ impl ServerState {
             0x01 => self.handle_join(addr, &data[1..]),
             0x02 => self.handle_audio(addr, &data[1..]),
             0x03 => self.handle_eof(addr),
+            0x04 => self.handle_mask(addr, &data[1..]),
             _ => eprintln!("{} sent an invalid packet", addr),
         }
     }
@@ -257,6 +217,33 @@ impl ServerState {
             }
             true
         });
+    }
+
+    fn handle_mask(&mut self, addr: SocketAddr, data: &[u8]) {
+        let Some(remote) = self.remotes.get(&addr) else {
+            eprintln!("mask from unknown client: {}", addr);
+            return;
+        };
+
+        let mut remote = remote.lock().unwrap();
+        let Ok(new_mask) = String::from_utf8(data.to_vec()) else {
+            eprintln!("mask sent over is not UTF-8");
+            return;
+        };
+
+        match &remote.mask {
+            Some(old_mask) => {
+                println!(
+                    "\"{}\" has changed their mask to \"{}\" ({})",
+                    old_mask, new_mask, addr
+                );
+            }
+            None => {
+                println!("\"{}\" has masked for the first time to \"{}\"", addr, new_mask);
+            }
+        }
+
+        remote.mask(&new_mask);
     }
 
     fn process_audio(&mut self) {
