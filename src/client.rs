@@ -117,16 +117,38 @@ impl ClientState {
         loop {
             // repl type beat
             let prompt = util::ask("> ");
-            match prompt.to_lowercase().as_str() {
+            let prompt = prompt.to_lowercase();
+            let (cmd, arg) = prompt.split_once(' ').unwrap_or((prompt.as_str(), ""));
+
+            print!(":: ");
+            match cmd {
                 "q" | "quit" => {
+                    println!("goodbye! ");
                     break;
                 }
                 "m" | "mute" => {
-                    muted_clone.store(!muted_clone.load(Ordering::Relaxed), Ordering::Relaxed);
-                    println!("toggled mute")
+                    let new_state = !muted_clone.load(Ordering::Relaxed);
+                    muted_clone.store(new_state, Ordering::Relaxed);
+
+                    let un = if new_state { "" } else { "un" };
+                    println!("microphone {}muted", un);
+                }
+                "n" | "nick" => {
+                    if arg.is_empty() {
+                        println!("no nick provided!");
+                        continue;
+                    }
+
+                    let mut nick_packet = vec![0x04];
+                    nick_packet.extend_from_slice(arg.as_bytes());
+                    self.socket
+                        .send(&nick_packet)
+                        .expect("failed to send leave packet");
+
+                    println!("you are now masked as '{}'", arg);
                 }
                 "h" | "help" => {
-                    println!(":: possible commands");
+                    println!("possible commands");
                     let content = String::from_utf8(include_bytes!("help.txt").to_vec())?;
 
                     for line in content.lines() {
@@ -134,7 +156,7 @@ impl ClientState {
                     }
                 }
                 _ => {
-                    println!(":: unknown command");
+                    println!("unknown command. type 'h' for help");
                 }
             }
         }

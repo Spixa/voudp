@@ -1,3 +1,4 @@
 m/mute: mute microphone
 q/quit: quit server
 h/help: get this page
+n/nick: set nick/mask
