@@ -181,7 +181,7 @@ impl ClientState {
                     let len = match encoder.encode_float(&frame_buf, &mut opus_data) {
                         Ok(len) => len,
                         Err(e) => {
-                            eprintln!("Encode error: {:?}", e);
+                            eprintln!("encode error: {:?}", e);
                             0
                         }
                     };
@@ -192,7 +192,7 @@ impl ClientState {
                         let mut packet = vec![0x02];
                         packet.extend_from_slice(&opus_data[..len]);
                         if let Err(e) = socket.send(&packet) {
-                            eprintln!("Send error: {}", e);
+                            eprintln!("send error: {}", e);
                         }
                     }
                 }
