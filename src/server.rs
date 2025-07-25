@@ -274,7 +274,8 @@ impl ServerState {
             // store in channel's buffer:
             if let Some(channel) = self.channels.get_mut(&remote.channel_id) {
                 channel.buffers.insert(addr, pcm);
-            }
+            } else {
+            } // TODO client uploaded data without being in a channel. it needs to be handled
         }
 
         for channel in self.channels.values_mut() {

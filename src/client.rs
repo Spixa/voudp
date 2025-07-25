@@ -171,9 +171,8 @@ impl ClientState {
                 while buffer.len() >= TARGET_FRAME_SIZE {
                     // the bufffer contains multiple frames. lets start by taking them out one by one
                     // take a frame
-                    for i in 0..TARGET_FRAME_SIZE {
-                        // clippy says theres a better way to do this idk what it's saying tho
-                        frame_buf[i] = buffer.pop_front().unwrap();
+                    for item in frame_buf.iter_mut().take(TARGET_FRAME_SIZE) {
+                        *item = buffer.pop_front().unwrap();
                     }
 
                     // encode the frame we took out, this time it has no excuse to cause opus invalid arguments error
