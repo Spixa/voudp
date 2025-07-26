@@ -1,4 +1,4 @@
-use opus::{Application, Channels, Decoder, Encoder};
+use opus::{Application, Channels as OpusChannels, Decoder, Encoder};
 use ringbuf::{
     HeapRb,
     traits::{Consumer, Observer, Producer},
@@ -27,8 +27,8 @@ struct Remote {
 
 impl Remote {
     fn new(addr: SocketAddr) -> Result<Self, opus::Error> {
-        let encoder = Encoder::new(SAMPLE_RATE, Channels::Mono, Application::Voip)?;
-        let decoder = Decoder::new(SAMPLE_RATE, Channels::Mono)?;
+        let encoder = Encoder::new(SAMPLE_RATE, OpusChannels::Stereo, Application::Audio)?;
+        let decoder = Decoder::new(SAMPLE_RATE, OpusChannels::Stereo)?;
         Ok(Self {
             encoder,
             decoder,
@@ -63,7 +63,7 @@ impl Channel {
         let addr = { remote.lock().unwrap().addr };
         self.remotes.push(remote);
 
-        self.buffers.insert(addr, vec![0.0; FRAME_SIZE]);
+        self.buffers.insert(addr, vec![0.0; FRAME_SIZE * 2]);
     }
 
     fn remove_remote(&mut self, addr: &SocketAddr) {
@@ -74,23 +74,41 @@ impl Channel {
     fn mix(&mut self, socket: &UdpSocket) {
         // in the new implementation, each remote gets their unique mixed audio, without their own voice
         // this type of implementation looks unnecessary at this stage but later on where each remote will have different audio settings for other remotes this will come in handy
+        const HPF_COEFF: f32 = 0.95;
+        let mut prev_left = 0.0f32;
+        let mut prev_right = 0.0f32;
 
         for remote in &self.remotes {
             let mut guard = remote.lock().unwrap();
             let remote_addr = guard.addr;
 
-            let mut mix = vec![0.0; 960];
+            let mut mix_left = vec![0.0; 960];
+            let mut mix_right = vec![0.0; 960];
             let mut active_remotes = 0;
 
             for (addr, buf) in &self.buffers {
+                if buf.len() != FRAME_SIZE * 2 {
+                    eprintln!("Invalid buffer size: {}", buf.len());
+                    continue;
+                }
+
                 if *addr == remote_addr {
                     continue; // skips remote's own voice
                 }
 
                 if !mixer::is_silent(buf) {
                     active_remotes += 1;
-                    for (i, sample) in buf.iter().enumerate() {
-                        mix[i] += *sample; // literally sum the PCM data to mix
+                    let stereo_buf = buf.clone();
+
+                    for (i, sample) in stereo_buf.chunks_exact(2).enumerate() {
+                        // apply high-pass filter to remove DC offset
+                        let left = sample[0] - prev_left + HPF_COEFF * prev_left;
+                        let right = sample[1] - prev_right + HPF_COEFF * prev_right;
+                        prev_left = left;
+                        prev_right = right;
+
+                        mix_left[i] += sample[0];
+                        mix_right[i] += sample[1];
                     }
                 }
             }
@@ -99,15 +117,30 @@ impl Channel {
                 continue; // no audio to send to this client
             }
 
-            mixer::normalize(&mut mix);
-            mixer::soft_clip(&mut mix);
+            mixer::normalize(&mut mix_left);
+            mixer::soft_clip(&mut mix_left);
+
+            mixer::normalize(&mut mix_right);
+            mixer::soft_clip(&mut mix_right);
             // other modules for mixer will be added later
 
-            if let Ok(encoded) = guard.encoder.encode_vec_float(&mix, 960) {
-                // build audio packet: 0x02 + encoded opus data
-                let mut packet = vec![0x02];
-                packet.extend_from_slice(&encoded);
+            // time to interleave the stereo samples:
+            let stereo_mix: Vec<f32> = mix_left
+                .iter()
+                .zip(mix_right.iter())
+                .flat_map(|(&l, &r)| [l, r])
+                .collect();
 
+            let mut encoded = vec![0u8; 400];
+            let len = guard
+                .encoder
+                .encode_float(&stereo_mix, &mut encoded)
+                .unwrap();
+
+            // build audio packet: 0x02 + encoded opus data
+            if len > 0 {
+                let mut packet = vec![0x02];
+                packet.extend_from_slice(&encoded[..len]);
                 if let Err(e) = socket.send_to(&packet, remote_addr) {
                     eprintln!("failed to send audio to {remote_addr} because: {e}");
                 }
@@ -239,7 +272,10 @@ impl ServerState {
                 );
             }
             None => {
-                println!("\"{}\" has masked for the first time to \"{}\"", addr, new_mask);
+                println!(
+                    "\"{}\" has masked for the first time to \"{}\"",
+                    addr, new_mask
+                );
             }
         }
 
@@ -255,14 +291,19 @@ impl ServerState {
             };
             let mut remote = remote.lock().unwrap();
 
-            let mut pcm = vec![0.0f32; 960];
-            remote.decoder.decode_float(&data, &mut pcm, false).ok();
-
-            // store in channel's buffer:
-            if let Some(channel) = self.channels.get_mut(&remote.channel_id) {
-                channel.buffers.insert(addr, pcm);
-            } else {
-            } // TODO client uploaded data without being in a channel. it needs to be handled
+            let mut pcm = vec![0.0f32; FRAME_SIZE * 2];
+            match remote.decoder.decode_float(&data, &mut pcm, false) {
+                Ok(len) => {
+                    if len == FRAME_SIZE {
+                        if let Some(channel) = self.channels.get_mut(&remote.channel_id) {
+                            channel.buffers.insert(addr, pcm);
+                        }
+                    } else {
+                        eprintln!("incomplete frame: {} samples", len);
+                    }
+                }
+                Err(e) => eprintln!("decoding error: {:?}", e),
+            }
         }
 
         for channel in self.channels.values_mut() {
@@ -296,7 +337,9 @@ impl ServerState {
         loop {
             match self.socket.recv_from(&mut buf) {
                 Ok((size, addr)) => self.handle_packet(addr, &buf[..size]),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                    std::thread::sleep(Duration::from_millis(1))
+                }
                 Err(e) => eprintln!("recv error: {}", e),
             }
 
@@ -304,7 +347,7 @@ impl ServerState {
             self.cleanup();
 
             // throttle loop
-            // std::thread::sleep(Duration::from_millis(1));
+            std::thread::sleep(Duration::from_millis(1));
         }
     }
 }
