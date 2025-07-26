@@ -1,4 +1,4 @@
-use std::{fs::File, io::Read, net::UdpSocket, time::Duration};
+use std::{fs::File, io::Read, net::UdpSocket, time::{Duration, Instant}};
 
 use anyhow::{Context, Result, anyhow};
 use opus::{Bitrate, Encoder};
@@ -17,6 +17,7 @@ use symphonia::{
 
 const TARGET_SAMPLE_RATE: u32 = 48_000;
 const FRAME_SIZE: usize = 960; // 20ms at 48kHz
+const FRAME_DURATION: Duration = Duration::from_millis(20);
 const CHANNELS: usize = 2; // Stereo
 const CHANNEL_ID: u32 = 1;
 
@@ -74,11 +75,16 @@ impl MusicClientState {
         let mut sample_buf = Vec::with_capacity(FRAME_SIZE * CHANNELS * 10); // 10 frames
         let sample_rate = track.codec_params.sample_rate.unwrap_or(TARGET_SAMPLE_RATE);
 
+        // timing stuff:
+        let start = Instant::now();
+        let mut f_idx = 0; // frame index
+
         while let Ok(packet) = format.next_packet() {
             if packet.track_id() != track_id {
                 continue;
             }
 
+            // holy hell it was a pain to figure all of them out except the first one maybe
             match decoder.decode(&packet)? {
                 AudioBufferRef::F32(buf) => process_buffer_f32(&buf, &mut sample_buf, sample_rate)?,
                 AudioBufferRef::S16(buf) => process_buffer_i16(&buf, &mut sample_buf, sample_rate)?,
@@ -90,6 +96,10 @@ impl MusicClientState {
 
             // this ensures that we are dealing with complete frames every time
             while sample_buf.len() >= FRAME_SIZE * CHANNELS {
+                // calculate target time: (frame index * frame duration) + begin offset
+                let target_time = start + FRAME_DURATION * f_idx;
+                f_idx += 1;
+
                 let frame = &sample_buf[..FRAME_SIZE * CHANNELS];
                 let mut opus_frame = vec![0u8; 4000]; // idk deepseek said its a good size
 
@@ -104,7 +114,12 @@ impl MusicClientState {
 
                 // remove the samples we read:
                 sample_buf.drain(0..FRAME_SIZE * CHANNELS);
-                std::thread::sleep(Duration::from_millis(20));
+
+                // timing logic:
+                let now = Instant::now();
+                if now < target_time {
+                    std::thread::sleep(target_time - now); // wait until we are back to schedule
+                }
             }
         }
 
