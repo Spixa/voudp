@@ -1,4 +1,9 @@
-use std::{fs::File, io::Read, net::UdpSocket, time::{Duration, Instant}};
+use std::{
+    fs::File,
+    io::Read,
+    net::UdpSocket,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, anyhow};
 use opus::{Bitrate, Encoder};
@@ -260,7 +265,10 @@ fn process_interleaved(
 ) -> Result<()> {
     // resample if necessary
     let resampled = if original_sample_rate != TARGET_SAMPLE_RATE {
-        println!("sample rate mismatch. resampling... [{} -> {}]", original_sample_rate, TARGET_SAMPLE_RATE);
+        println!(
+            "sample rate mismatch. resampling... [{} -> {}]",
+            original_sample_rate, TARGET_SAMPLE_RATE
+        );
         resample(
             interleaved,
             original_sample_rate,

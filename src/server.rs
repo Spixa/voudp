@@ -76,76 +76,72 @@ impl Channel {
     }
 
     fn mix(&mut self, socket: &UdpSocket) {
-        // in the new implementation, each remote gets their unique mixed audio, without their own voice
-        // this type of implementation looks unnecessary at this stage but later on where each remote will have different audio settings for other remotes this will come in handy
+        // pre-proc all talkers + remove DC bias at this stage
+        let mut processed_buffers = HashMap::new();
+        for (addr, buf) in &self.buffers {
+            if buf.len() != FRAME_SIZE * 2 {
+                continue;
+            }
 
+            // skip silent buf
+            if mixer::is_silent(buf) {
+                continue;
+            }
+
+            // get/create filter state for in-place DC removal
+            let state = self.filter_states.entry(*addr).or_insert((0.0, 0.0));
+            let mut processed = buf.clone();
+            mixer::remove_dc_bias(&mut processed, state);
+            processed_buffers.insert(*addr, processed);
+        }
+
+        // personalized mixer for every remote:
         for remote in &self.remotes {
             let mut guard = remote.lock().unwrap();
             let remote_addr = guard.addr;
 
-            let mut mix_left = vec![0.0; 960];
-            let mut mix_right = vec![0.0; 960];
-            let mut active_remotes = 0;
+            // skip if this remote has no buffer
+            if !self.buffers.contains_key(&remote_addr) {
+                continue;
+            }
 
-            for (addr, buf) in &self.buffers {
-                if buf.len() != FRAME_SIZE * 2 {
-                    eprintln!("Invalid buffer size: {}", buf.len());
+            let mut mix = vec![0.0; FRAME_SIZE * 2];
+            let mut active_count = 0;
+
+            for (addr, buf) in &processed_buffers {
+                // Skip listener's own audio
+                if *addr == remote_addr {
                     continue;
                 }
 
-                if *addr == remote_addr {
-                    continue; // skips remote's own voice
+                // Skip silent audio
+                if mixer::is_silent(buf) {
+                    continue;
                 }
 
-                let state = self.filter_states.entry(*addr).or_insert((0.0, 0.0));
+                active_count += 1;
 
-                if !mixer::is_silent(buf) {
-                    active_remotes += 1;
-                    let stereo_buf = buf.clone();
-
-                    for (i, sample) in stereo_buf.chunks_exact(2).enumerate() {
-                        // apply high-pass filter to remove DC offset
-                        let left = sample[0] - state.0;
-                        let right = sample[1] - state.1;
-                        state.0 = left;
-                        state.1 = right;
-
-                        mix_left[i] += sample[0];
-                        mix_right[i] += sample[1];
-                    }
+                // Accumulate with automatic gain control
+                let gain = 1.0 / (active_count as f32).sqrt();
+                for (i, sample) in buf.iter().enumerate() {
+                    mix[i] += sample * gain;
                 }
             }
 
-            if active_remotes == 0 {
-                continue; // no audio to send to this client
+            if active_count == 0 {
+                continue;
             }
 
-            mixer::normalize(&mut mix_left);
-            mixer::soft_clip(&mut mix_left);
-
-            mixer::normalize(&mut mix_right);
-            mixer::soft_clip(&mut mix_right);
-            // other modules for mixer will be added later
-
-            // time to interleave the stereo samples:
-            let stereo_mix: Vec<f32> = mix_left
-                .iter()
-                .zip(mix_right.iter())
-                .flat_map(|(&l, &r)| [l, r])
-                .collect();
+            mixer::compress(&mut mix, 0.5, 0.8);
 
             let mut encoded = vec![0u8; 400];
-            let len = guard
-                .encoder
-                .encode_float(&stereo_mix, &mut encoded)
-                .unwrap();
+            let len = guard.encoder.encode_float(&mix, &mut encoded).unwrap();
 
-            // build audio packet: 0x02 + encoded opus data
             if len > 0 {
                 let mut packet = vec![0x02];
                 packet.extend_from_slice(&encoded[..len]);
                 if let Err(e) = socket.send_to(&packet, remote_addr) {
-                    eprintln!("failed to send audio to {remote_addr} because: {e}");
+                    eprintln!("failed to send some audio to {remote_addr} because {e}");
                 }
             }
         }

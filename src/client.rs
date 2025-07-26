@@ -54,6 +54,8 @@ impl ClientState {
         let output_device = host.default_output_device().expect("no output device");
         let muted = Arc::new(AtomicBool::new(false));
         let muted_clone = muted.clone();
+        let deafened = Arc::new(AtomicBool::new(false));
+        let deafened_clone = deafened.clone();
 
         let config = cpal::StreamConfig {
             channels: 1, // mono input but will turn into stereo
@@ -118,7 +120,11 @@ impl ClientState {
                 let mut buffer = output_buffer_clone.lock().unwrap();
                 for sample in data.iter_mut() {
                     // write our samples that cpal will be playing for us like so:
-                    *sample = buffer.pop_front().unwrap_or(0.0);
+                    *sample = if !deafened.load(Ordering::Relaxed) {
+                        buffer.pop_front().unwrap_or(0.0)
+                    } else {
+                        0.0
+                    };
                 }
             },
             |err| eprintln!("audio output error: {:?}", err),
@@ -149,6 +155,13 @@ impl ClientState {
 
                     let un = if new_state { "" } else { "un" };
                     println!("microphone {}muted", un);
+                }
+                "d" | "deafen" => {
+                    let new_state = !deafened_clone.load(Ordering::Relaxed);
+                    deafened_clone.store(new_state, Ordering::Relaxed);
+
+                    let un = if new_state { "" } else { "un" };
+                    println!("speaker {}deafened", un);
                 }
                 "n" | "nick" => {
                     if arg.is_empty() {
