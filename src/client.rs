@@ -34,9 +34,13 @@ impl ClientState {
         join_packet.extend_from_slice(&CHANNEL_ID.to_be_bytes());
         self.socket.send(&join_packet)?;
 
-        // audio buffers are double ended queues that stage BUFFER_CAPACITY/TARGET_FRAME_SIZE frames ahead for headroom
-        let input_buffer = Arc::new(Mutex::new(VecDeque::<f32>::with_capacity(BUFFER_CAPACITY)));
-        let output_buffer = Arc::new(Mutex::new(VecDeque::<f32>::with_capacity(BUFFER_CAPACITY)));
+        // audio buffers are double ended queues that stage BUFFER_CAPACITY/TARGET_FRAME_SIZE frames ahead for headroom (2x the cap for stereo)
+        let input_buffer = Arc::new(Mutex::new(VecDeque::<f32>::with_capacity(
+            BUFFER_CAPACITY * 2,
+        )));
+        let output_buffer = Arc::new(Mutex::new(VecDeque::<f32>::with_capacity(
+            BUFFER_CAPACITY * 2,
+        )));
 
         // network thread stuff
         let socket_clone = self.socket.try_clone()?;
@@ -52,7 +56,7 @@ impl ClientState {
         let muted_clone = muted.clone();
 
         let config = cpal::StreamConfig {
-            channels: 1,
+            channels: 1, // mono input but will turn into stereo
             sample_rate: cpal::SampleRate(48000),
             buffer_size: cpal::BufferSize::Default,
             /*
@@ -69,22 +73,28 @@ impl ClientState {
         let input_buffer_clone = Arc::clone(&input_buffer);
         let input_stream = input_device.build_input_stream(
             &config,
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
+            move |data: &[f32], _| {
                 // we will be uploading to the input buffer
                 let mut buffer = input_buffer_clone.lock().unwrap();
 
                 for sample in data {
-                    if buffer.len() >= BUFFER_CAPACITY {
-                        // remove oldest samples to make space
+                    if buffer.len() >= BUFFER_CAPACITY * 2 {
+                        // remove oldest sample to make space
+                        buffer.pop_front();
                         buffer.pop_front();
                     }
 
                     if !muted.load(Ordering::Relaxed) {
                         // pcm samples when we arent muted
-                        let loudness: f32 = 1.0; // this can be adjusted later
-                        buffer.push_back(*sample * loudness/*.tanh() it later maybe to ensure its between -1 to +1 */);
+                        let loudness: f32 = 0.8; // this can be adjusted later
+                        let processed = (sample * loudness).tanh();
+
+                        // write both for left and right (mono -> stereo)
+                        buffer.push_back(processed);
+                        buffer.push_back(processed);
                     } else {
-                        // muted
+                        // muted (write 0.0 pair)
+                        buffer.push_back(0.0);
                         buffer.push_back(0.0);
                     }
                 }
@@ -93,11 +103,18 @@ impl ClientState {
             None,
         )?;
 
+        // output stream (stereo)
+        let output_config = cpal::StreamConfig {
+            channels: 2, // stereo output
+            sample_rate: cpal::SampleRate(48000),
+            buffer_size: cpal::BufferSize::Default,
+        };
+
         // output stream
         let output_buffer_clone = Arc::clone(&output_buffer);
         let output_stream = output_device.build_output_stream(
-            &config,
-            move |data: &mut [f32], _: &cpal::OutputCallbackInfo| {
+            &output_config,
+            move |data: &mut [f32], _| {
                 let mut buffer = output_buffer_clone.lock().unwrap();
                 for sample in data.iter_mut() {
                     // write our samples that cpal will be playing for us like so:
@@ -174,27 +191,37 @@ impl ClientState {
         output_buffer: Arc<Mutex<VecDeque<f32>>>,
     ) {
         // create Opus encoder/decoder
-        let mut encoder = Encoder::new(48000, Channels::Mono, Application::Voip).unwrap();
-        let mut decoder = Decoder::new(48000, Channels::Mono).unwrap();
+        let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
+        let mut decoder = Decoder::new(48000, Channels::Stereo).unwrap();
 
         // set encoder options
         encoder
-            .set_bitrate(opus::Bitrate::Bits(64000))
-            .expect("couldn't set bitrate"); // 64 kbps is good
+            .set_bitrate(opus::Bitrate::Bits(128000))
+            .expect("couldn't set bitrate"); // 128 kbps is good (64kbps each OpusChannel)
 
         // the buffers for sending and receiving
-        let mut recv_buf = [0u8; 2048]; // audio from server (2048 byte datagram)
-        let mut frame_buf = vec![0.0f32; TARGET_FRAME_SIZE]; // audio we will send
+        let mut recv_buf = [0u8; 2048]; // stereo audio from server (2048 byte datagram)
+        let mut frame_buf = vec![0.0f32; TARGET_FRAME_SIZE * 2]; // stereo audio we will send
 
         loop {
             // send audio to server (from input buffer)
             {
                 let mut buffer = input_buffer.lock().unwrap();
-                while buffer.len() >= TARGET_FRAME_SIZE {
+                while buffer.len() >= TARGET_FRAME_SIZE * 2 {
                     // the bufffer contains multiple frames. lets start by taking them out one by one
                     // take a frame
-                    for item in frame_buf.iter_mut().take(TARGET_FRAME_SIZE) {
-                        *item = buffer.pop_front().unwrap();
+                    for i in 0..TARGET_FRAME_SIZE {
+                        let left = buffer.pop_front().unwrap_or(0.0);
+                        let right = buffer.pop_front().unwrap_or(0.0);
+                        frame_buf[i * 2] = left;
+                        frame_buf[i * 2 + 1] = right;
+                    }
+
+                    for sample in frame_buf.iter_mut() {
+                        // Noise gate - reduce very quiet sounds
+                        if sample.abs() < 0.001 {
+                            *sample = 0.0;
+                        }
                     }
 
                     // encode the frame we took out, this time it has no excuse to cause opus invalid arguments error
@@ -223,21 +250,23 @@ impl ClientState {
             match socket.recv_from(&mut recv_buf) {
                 Ok((size, _)) => {
                     if size > 1 && recv_buf[0] == 0x02 {
-                        let mut pcm = vec![0.0f32; TARGET_FRAME_SIZE];
+                        let mut pcm = vec![0.0f32; TARGET_FRAME_SIZE * 2 /* stereo */];
                         match decoder.decode_float(&recv_buf[1..size], &mut pcm, false) {
                             Ok(decoded) => {
                                 if decoded > 0 {
                                     // push to output buffer
                                     let mut buffer = output_buffer.lock().unwrap();
-                                    for sample in &pcm[..decoded] {
-                                        if buffer.len() >= BUFFER_CAPACITY {
+                                    for sample in &pcm[..(decoded * 2/* stereo */)] {
+                                        if buffer.len() >= BUFFER_CAPACITY * 2
+                                        /* stereo */
+                                        {
                                             buffer.pop_front();
                                         }
                                         buffer.push_back(*sample);
                                     }
                                 }
                             }
-                            Err(e) => eprintln!("Decode error: {:?}", e),
+                            Err(e) => eprintln!("decode error: {:?}", e),
                         }
                     }
                 }
@@ -245,7 +274,7 @@ impl ClientState {
                     thread::sleep(Duration::from_millis(1));
                 }
                 Err(e) => {
-                    eprintln!("Recv error: {:?}", e);
+                    eprintln!("recv error: {:?}", e);
                     break;
                 }
             }
