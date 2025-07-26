@@ -48,6 +48,7 @@ type SafeRemote = Arc<Mutex<Remote>>;
 struct Channel {
     remotes: Vec<SafeRemote>,
     buffers: HashMap<SocketAddr, Vec<f32>>,
+    filter_states: HashMap<SocketAddr, (f32, f32)>,
 }
 
 impl Channel {
@@ -56,6 +57,7 @@ impl Channel {
         Self {
             remotes: vec![],
             buffers: HashMap::new(),
+            filter_states: HashMap::new(),
         }
     }
 
@@ -64,19 +66,18 @@ impl Channel {
         self.remotes.push(remote);
 
         self.buffers.insert(addr, vec![0.0; FRAME_SIZE * 2]);
+        self.filter_states.insert(addr, (0.0, 0.0));
     }
 
     fn remove_remote(&mut self, addr: &SocketAddr) {
         self.remotes.retain(|c| c.lock().unwrap().addr != *addr);
         self.buffers.remove(addr);
+        self.filter_states.remove(addr);
     }
 
     fn mix(&mut self, socket: &UdpSocket) {
         // in the new implementation, each remote gets their unique mixed audio, without their own voice
         // this type of implementation looks unnecessary at this stage but later on where each remote will have different audio settings for other remotes this will come in handy
-        const HPF_COEFF: f32 = 0.95;
-        let mut prev_left = 0.0f32;
-        let mut prev_right = 0.0f32;
 
         for remote in &self.remotes {
             let mut guard = remote.lock().unwrap();
@@ -96,16 +97,18 @@ impl Channel {
                     continue; // skips remote's own voice
                 }
 
+                let state = self.filter_states.entry(*addr).or_insert((0.0, 0.0));
+
                 if !mixer::is_silent(buf) {
                     active_remotes += 1;
                     let stereo_buf = buf.clone();
 
                     for (i, sample) in stereo_buf.chunks_exact(2).enumerate() {
                         // apply high-pass filter to remove DC offset
-                        let left = sample[0] - prev_left + HPF_COEFF * prev_left;
-                        let right = sample[1] - prev_right + HPF_COEFF * prev_right;
-                        prev_left = left;
-                        prev_right = right;
+                        let left = sample[0] - state.0;
+                        let right = sample[1] - state.1;
+                        state.0 = left;
+                        state.1 = right;
 
                         mix_left[i] += sample[0];
                         mix_right[i] += sample[1];
