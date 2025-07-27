@@ -36,6 +36,22 @@ pub fn remove_dc_bias(buf: &mut [f32], prev: &mut (f32, f32)) {
     }
 }
 
+// pub fn remove_dc_bias(buf: &mut [f32], prev: &mut (f32, f32)) {
+//     const ALPHA: f32 = 0.999; // Strong DC removal
+
+//     for i in (0..buf.len()).step_by(2) {
+//         // Left channel
+//         let left = buf[i] - prev.0;
+//         prev.0 = buf[i];
+//         buf[i] = left * ALPHA;
+
+//         // Right channel
+//         let right = buf[i+1] - prev.1;
+//         prev.1 = buf[i+1];
+//         buf[i+1] = right * ALPHA;
+//     }
+// }
+
 pub fn compress(buf: &mut [f32], threshold: f32, ratio: f32) {
     for sample in buf {
         let abs = sample.abs();
