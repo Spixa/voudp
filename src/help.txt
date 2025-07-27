@@ -1,4 +1,5 @@
 m/mute: mute microphone
+d/deaf: deafen speaker
 q/quit: quit server
 h/help: get this page
 n/nick: set nick/mask

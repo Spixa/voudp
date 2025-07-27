@@ -156,7 +156,7 @@ impl ClientState {
                     let un = if new_state { "" } else { "un" };
                     println!("microphone {}muted", un);
                 }
-                "d" | "deafen" => {
+                "d" | "deaf" => {
                     let new_state = !deafened_clone.load(Ordering::Relaxed);
                     deafened_clone.store(new_state, Ordering::Relaxed);
 
