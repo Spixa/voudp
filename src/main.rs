@@ -1,4 +1,5 @@
 use anyhow::Result;
+use log::error;
 
 use crate::{client::ClientState, music::MusicClientState, server::ServerState};
 
@@ -9,7 +10,9 @@ mod server;
 mod util;
 
 fn main() -> Result<()> {
-    let result = util::ask("[s]erver/[c]lient/[m]usic client: ");
+    pretty_env_logger::init_timed();
+
+    let result = util::ask("> [s]erver/[c]lient/[m]usic client: ");
     match result.as_str() {
         "c" => {
             let mut client = ClientState::new("127.0.0.1:37549")?;
@@ -25,7 +28,7 @@ fn main() -> Result<()> {
             client.run(path)?;
         }
         _ => {
-            eprintln!("write c/s/m");
+            error!("write c/s/m");
         }
     }
     Ok(())
