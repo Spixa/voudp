@@ -56,13 +56,6 @@ impl Default for ServerConfig {
 }
 
 impl ServerConfig {
-    pub fn with_port(bind_port: u16) -> Self {
-        Self {
-            bind_port,
-            ..Default::default()
-        }
-    }
-
     pub fn get_framesize(&self) -> usize {
         (self.sample_rate / self.tickrate).try_into().unwrap()
     }
