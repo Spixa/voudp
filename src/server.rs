@@ -32,7 +32,12 @@ impl Remote {
         let mut encoder = Encoder::new(SAMPLE_RATE, OpusChannels::Stereo, Application::Audio)?;
         let decoder = Decoder::new(SAMPLE_RATE, OpusChannels::Stereo)?;
 
-        info!("New client has initialized with addr {} (rate: {}, audio: {})", addr, encoder.get_sample_rate()?, "Stereo");
+        info!(
+            "New client has initialized with addr {} (rate: {}, audio: {})",
+            addr,
+            encoder.get_sample_rate()?,
+            "Stereo"
+        );
         Ok(Self {
             encoder,
             decoder,
@@ -170,7 +175,10 @@ impl ServerState {
         socket.set_nonblocking(true)?;
         info!("Bound to 0.0.0.0:{}", port);
         let socket = Arc::new(socket); // wrap in Arc
-        info!("There are {} free buffers (max remotes that can connect)", RB_CAP);
+        info!(
+            "There are {} free buffers (max remotes that can connect)",
+            RB_CAP
+        );
         Ok(Self {
             socket: Arc::clone(&socket),
             remotes: HashMap::new(),
@@ -303,7 +311,10 @@ impl ServerState {
                             channel.buffers.insert(addr, pcm);
                         }
                     } else {
-                        error!("incomplete frame: {} samples when we are expecting {}", len, FRAME_SIZE);
+                        error!(
+                            "incomplete frame: {} samples when we are expecting {}",
+                            len, FRAME_SIZE
+                        );
                     }
                 }
                 Err(e) => error!("decoding error: {:?}", e),
