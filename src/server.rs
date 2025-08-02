@@ -80,14 +80,12 @@ struct Remote {
 
 impl Remote {
     fn new(addr: SocketAddr, sample_rate: u32) -> Result<Self, opus::Error> {
-        let mut encoder = Encoder::new(sample_rate, OpusChannels::Stereo, Application::Audio)?;
+        let encoder = Encoder::new(sample_rate, OpusChannels::Stereo, Application::Audio)?;
         let decoder = Decoder::new(sample_rate, OpusChannels::Stereo)?;
 
         info!(
-            "New client has initialized with addr {} (rate: {}, audio: {})",
-            addr,
-            encoder.get_sample_rate()?,
-            "Stereo"
+            "New client has initialized with addr {} (sample rate: {}, audio: {})",
+            addr, sample_rate, "Stereo"
         );
         Ok(Self {
             encoder,
