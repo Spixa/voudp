@@ -1,11 +1,11 @@
-use log::{error, info, warn};
+use log::{error, info, trace, warn};
 use opus::{Application, Channels as OpusChannels, Decoder, Encoder};
 use ringbuf::{
     HeapRb,
     traits::{Consumer, Observer, Producer},
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     io,
     net::{SocketAddr, UdpSocket},
     sync::{Arc, Mutex},
@@ -17,6 +17,7 @@ use crate::mixer;
 const SAMPLE_RATE: u32 = 48000;
 const FRAME_SIZE: usize = 960; // per 20ms = 48000
 const RB_CAP: usize = 1024;
+const JITTER_BUFFER_LEN: usize = 10;
 
 struct Remote {
     encoder: Encoder,
@@ -25,6 +26,7 @@ struct Remote {
     channel_id: u32,
     addr: SocketAddr,
     mask: Option<String>,
+    jitter_buffer: VecDeque<Vec<f32>>,
 }
 
 impl Remote {
@@ -45,6 +47,7 @@ impl Remote {
             channel_id: 0,
             addr,
             mask: None,
+            jitter_buffer: VecDeque::with_capacity(JITTER_BUFFER_LEN),
         })
     }
 
@@ -85,77 +88,70 @@ impl Channel {
     }
 
     fn mix(&mut self, socket: &UdpSocket) {
-        // pre-proc all talkers + remove DC bias at this stage
+        // pre-proc audio for every remote:
         let mut processed_buffers = HashMap::new();
         for (addr, buf) in &self.buffers {
-            if buf.len() != FRAME_SIZE * 2 {
+            if buf.len() != FRAME_SIZE * 2 || mixer::is_silent(buf) {
                 continue;
             }
 
-            // skip silent buf
-            if mixer::is_silent(buf) {
-                continue;
-            }
-
-            // get/create filter state for in-place DC removal
             let state = self.filter_states.entry(*addr).or_insert((0.0, 0.0));
             let mut processed = buf.clone();
             mixer::remove_dc_bias(&mut processed, state);
             processed_buffers.insert(*addr, processed);
         }
 
-        // personalized mixer for every remote:
+        // personalized mix which is done separately
         for remote in &self.remotes {
             let mut guard = remote.lock().unwrap();
             let remote_addr = guard.addr;
 
-            // skip if this remote has no buffer
             if !self.buffers.contains_key(&remote_addr) {
                 continue;
             }
 
-            let mut mix = vec![0.0; FRAME_SIZE * 2];
-            let mut active_count = 0;
+            // collect all active talkers excluding self
+            let talkers: Vec<_> = processed_buffers
+                .iter()
+                .filter(|(addr, _)| **addr != remote_addr)
+                .collect();
 
-            for (addr, buf) in &processed_buffers {
-                // Skip listener's own audio
-                if *addr == remote_addr {
-                    continue;
-                }
+            let active_count = talkers.len();
+            if active_count == 0 {
+                continue;
+            }
 
-                // Skip silent audio
-                if mixer::is_silent(buf) {
-                    continue;
-                }
+            // Compute gain once
+            let gain = 1.0 / (active_count as f32).sqrt();
 
-                active_count += 1;
-
-                // Accumulate with automatic gain control
-                let gain = 1.0 / (active_count as f32).sqrt();
+            let mut mix = vec![0.0f32; FRAME_SIZE * 2];
+            for (mixing_remote, buf) in talkers {
+                trace!(
+                    "Now mixing {} with the total audio being sent to {}",
+                    mixing_remote, remote_addr
+                );
                 for (i, sample) in buf.iter().enumerate() {
                     mix[i] += sample * gain;
                 }
             }
 
-            if active_count == 0 {
-                continue;
-            }
-
             mixer::compress(&mut mix, 0.5, 0.8);
+            mixer::normalize(&mut mix);
+            mixer::soft_clip(&mut mix);
 
             let mut encoded = vec![0u8; 400];
-            let len = guard.encoder.encode_float(&mix, &mut encoded).unwrap();
+            let len = guard.encoder.encode_float(&mix, &mut encoded).unwrap_or(0);
 
             if len > 0 {
                 let mut packet = vec![0x02];
                 packet.extend_from_slice(&encoded[..len]);
                 if let Err(e) = socket.send_to(&packet, remote_addr) {
-                    error!("failed to send some audio to {remote_addr} because {e}");
+                    error!("Failed to send audio to {remote_addr}: {e}");
                 }
             }
         }
 
-        // reset buffers for next frame to come
+        // Clear buffers for next tick
         for buf in self.buffers.values_mut() {
             buf.fill(0.0);
         }
@@ -294,30 +290,39 @@ impl ServerState {
         remote.mask(&new_mask);
     }
 
-    fn process_audio(&mut self) {
-        // pop audio bufffers from every remote with their associated data
+    fn process_audio_tick(&mut self) {
+        // Decode incoming packets and fill jitter buffers
         while let Some((addr, data)) = self.audio_rb.try_pop() {
             let Some(remote) = self.remotes.get(&addr) else {
-                // if the peer's remote can be retreived get it
                 continue;
             };
             let mut remote = remote.lock().unwrap();
 
             let mut pcm = vec![0.0f32; FRAME_SIZE * 2];
             match remote.decoder.decode_float(&data, &mut pcm, false) {
-                Ok(len) => {
-                    if len == FRAME_SIZE {
-                        if let Some(channel) = self.channels.get_mut(&remote.channel_id) {
-                            channel.buffers.insert(addr, pcm);
-                        }
+                Ok(len) if len == FRAME_SIZE => {
+                    if remote.jitter_buffer.len() < JITTER_BUFFER_LEN {
+                        remote.jitter_buffer.push_back(pcm);
                     } else {
-                        error!(
-                            "incomplete frame: {} samples when we are expecting {}",
-                            len, FRAME_SIZE
-                        );
+                        warn!("Jitter buffer full for {addr}");
                     }
                 }
-                Err(e) => error!("decoding error: {:?}", e),
+                Ok(len) => error!("Bad frame size from {addr}: got {len}, expected {FRAME_SIZE}"),
+                Err(e) => error!("Decode error from {addr}: {e:?}"),
+            }
+        }
+
+        // Pull one frame per remote into channel buffer
+        for (addr, remote) in &self.remotes {
+            let mut remote = remote.lock().unwrap();
+            let chan_id = remote.channel_id;
+            let frame = remote
+                .jitter_buffer
+                .pop_front()
+                .unwrap_or(vec![0.0; FRAME_SIZE * 2]);
+
+            if let Some(channel) = self.channels.get_mut(&chan_id) {
+                channel.buffers.insert(*addr, frame);
             }
         }
 
@@ -347,21 +352,20 @@ impl ServerState {
     }
 
     pub fn run(&mut self) {
-        let mut buf = [0u8; 2048]; // max datagram size is 2048
+        let mut buf = [0u8; 2048];
+        let mut next_tick = Instant::now();
 
         loop {
-            match self.socket.recv_from(&mut buf) {
-                Ok((size, addr)) => self.handle_packet(addr, &buf[..size]),
-                Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(1))
-                }
-                Err(e) => error!("recv error: {}", e),
+            while let Ok((size, addr)) = self.socket.recv_from(&mut buf) {
+                self.handle_packet(addr, &buf[..size]);
             }
 
-            self.process_audio();
-            self.cleanup();
+            if Instant::now() >= next_tick {
+                self.process_audio_tick();
+                self.cleanup();
+                next_tick += Duration::from_millis(20);
+            }
 
-            // throttle loop
             std::thread::sleep(Duration::from_millis(1));
         }
     }

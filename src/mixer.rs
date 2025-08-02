@@ -1,6 +1,6 @@
 const SILENCE_THRESHOLD: f32 = 0.001; // silence threshold
 
-pub fn _normalize(buf: &mut [f32]) {
+pub fn normalize(buf: &mut [f32]) {
     let max = buf.iter().fold(0.0, |max, &s| f32::max(max, s.abs()));
 
     if max > 1.0 {
@@ -11,7 +11,7 @@ pub fn _normalize(buf: &mut [f32]) {
     }
 }
 
-pub fn _soft_clip(buf: &mut [f32]) {
+pub fn soft_clip(buf: &mut [f32]) {
     for sample in buf {
         *sample = sample.tanh(); // thanks deepseek. the range of tanh is -1 to +1. this will do the soft clipping for us
     }
