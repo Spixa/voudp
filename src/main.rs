@@ -1,7 +1,11 @@
 use anyhow::Result;
 use log::error;
 
-use crate::{client::ClientState, music::MusicClientState, server::ServerState};
+use crate::{
+    client::ClientState,
+    music::MusicClientState,
+    server::{ServerConfig, ServerState},
+};
 
 mod client;
 mod mixer;
@@ -19,7 +23,9 @@ fn main() -> Result<()> {
             client.run()?;
         }
         "s" => {
-            let mut server = ServerState::new(37549)?;
+            let config = ServerConfig::with_port(37549);
+
+            let mut server = ServerState::new(config)?;
             server.run();
         }
         "m" => {
