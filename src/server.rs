@@ -1,3 +1,4 @@
+use log::{error, info, warn};
 use opus::{Application, Channels as OpusChannels, Decoder, Encoder};
 use ringbuf::{
     HeapRb,
@@ -15,6 +16,7 @@ use crate::mixer;
 
 const SAMPLE_RATE: u32 = 48000;
 const FRAME_SIZE: usize = 960; // per 20ms = 48000
+const RB_CAP: usize = 1024;
 
 struct Remote {
     encoder: Encoder,
@@ -27,8 +29,10 @@ struct Remote {
 
 impl Remote {
     fn new(addr: SocketAddr) -> Result<Self, opus::Error> {
-        let encoder = Encoder::new(SAMPLE_RATE, OpusChannels::Stereo, Application::Audio)?;
+        let mut encoder = Encoder::new(SAMPLE_RATE, OpusChannels::Stereo, Application::Audio)?;
         let decoder = Decoder::new(SAMPLE_RATE, OpusChannels::Stereo)?;
+
+        info!("New client has initialized with addr {} (rate: {}, audio: {})", addr, encoder.get_sample_rate()?, "Stereo");
         Ok(Self {
             encoder,
             decoder,
@@ -53,7 +57,7 @@ struct Channel {
 
 impl Channel {
     fn new() -> Self {
-        println!("created new channel");
+        info!("Created new channel");
         Self {
             remotes: vec![],
             buffers: HashMap::new(),
@@ -141,7 +145,7 @@ impl Channel {
                 let mut packet = vec![0x02];
                 packet.extend_from_slice(&encoded[..len]);
                 if let Err(e) = socket.send_to(&packet, remote_addr) {
-                    eprintln!("failed to send some audio to {remote_addr} because {e}");
+                    error!("failed to send some audio to {remote_addr} because {e}");
                 }
             }
         }
@@ -164,13 +168,14 @@ impl ServerState {
     pub fn new(port: u16) -> Result<Self, io::Error> {
         let socket = UdpSocket::bind(format!("0.0.0.0:{}", port))?;
         socket.set_nonblocking(true)?;
+        info!("Bound to 0.0.0.0:{}", port);
         let socket = Arc::new(socket); // wrap in Arc
-
+        info!("There are {} free buffers (max remotes that can connect)", RB_CAP);
         Ok(Self {
             socket: Arc::clone(&socket),
             remotes: HashMap::new(),
             channels: HashMap::new(),
-            audio_rb: HeapRb::new(1024),
+            audio_rb: HeapRb::new(RB_CAP),
         })
     }
 
@@ -184,7 +189,7 @@ impl ServerState {
             0x02 => self.handle_audio(addr, &data[1..]),
             0x03 => self.handle_eof(addr),
             0x04 => self.handle_mask(addr, &data[1..]),
-            _ => eprintln!("{} sent an invalid packet", addr),
+            _ => error!("{} sent an invalid packet", addr),
         }
     }
 
@@ -195,10 +200,10 @@ impl ServerState {
         // this is painful:
         let chan_id = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
 
-        println!("{} has joined the channel with id {}", addr, chan_id);
+        info!("{} has joined the channel with id {}", addr, chan_id);
         // move remote to new channel or create new remote if it is new
         let remote = self.remotes.entry(addr).or_insert_with(|| {
-            println!("\tthis remote is new!");
+            info!("{} is a new remote", addr);
             Arc::new(Mutex::new(
                 Remote::new(addr).expect("remote creation failed"),
             ))
@@ -230,7 +235,7 @@ impl ServerState {
 
         // push to ring buffer for audio processing:
         if self.audio_rb.is_full() {
-            eprintln!("audio buffer overflow");
+            error!("audio buffer overflow");
             return;
         }
 
@@ -242,7 +247,7 @@ impl ServerState {
             if *addr_got == addr {
                 let channel_id = { remote.lock().unwrap().channel_id };
                 if let Some(channel) = self.channels.get_mut(&channel_id) {
-                    println!("{addr} has left");
+                    info!("{addr} has left");
                     channel.remove_remote(&addr);
                 } // if this is false, the remote is channel-less which i don't know how that would even happen
                 return false;
@@ -253,25 +258,25 @@ impl ServerState {
 
     fn handle_mask(&mut self, addr: SocketAddr, data: &[u8]) {
         let Some(remote) = self.remotes.get(&addr) else {
-            eprintln!("mask from unknown client: {}", addr);
+            warn!("mask from unknown client: {}, skipping request...", addr);
             return;
         };
 
         let mut remote = remote.lock().unwrap();
         let Ok(new_mask) = String::from_utf8(data.to_vec()) else {
-            eprintln!("mask sent over is not UTF-8");
+            warn!("mask sent over is not UTF-8, skipping request...");
             return;
         };
 
         match &remote.mask {
             Some(old_mask) => {
-                println!(
+                info!(
                     "\"{}\" has changed their mask to \"{}\" ({})",
                     old_mask, new_mask, addr
                 );
             }
             None => {
-                println!(
+                info!(
                     "\"{}\" has masked for the first time to \"{}\"",
                     addr, new_mask
                 );
@@ -298,10 +303,10 @@ impl ServerState {
                             channel.buffers.insert(addr, pcm);
                         }
                     } else {
-                        eprintln!("incomplete frame: {} samples", len);
+                        error!("incomplete frame: {} samples when we are expecting {}", len, FRAME_SIZE);
                     }
                 }
-                Err(e) => eprintln!("decoding error: {:?}", e),
+                Err(e) => error!("decoding error: {:?}", e),
             }
         }
 
@@ -320,7 +325,7 @@ impl ServerState {
 
             if now.duration_since(last_active) > Duration::from_secs(5) {
                 if let Some(channel) = self.channels.get_mut(&channel_id) {
-                    println!("{addr} is dropped due to timeout");
+                    info!("{addr} is dropped due to timeout");
                     channel.remove_remote(addr);
                 } // if this is false, the remote is channel-less which i don't know how that would even happen
                 false // remote hasn't updated in the past N seconds, needs to be kicked
@@ -339,7 +344,7 @@ impl ServerState {
                 Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
                     std::thread::sleep(Duration::from_millis(1))
                 }
-                Err(e) => eprintln!("recv error: {}", e),
+                Err(e) => error!("recv error: {}", e),
             }
 
             self.process_audio();
