@@ -1,0 +1,12 @@
+[package]
+name = "voudp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cpal = "0.15"
+opus = "0.3"
+anyhow = "1"
+log = "0.4"
+ringbuf = "0.4.8"
+symphonia = "0.5.4"
