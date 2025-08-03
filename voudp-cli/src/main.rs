@@ -5,15 +5,10 @@ use log::Level;
 use pretty_env_logger::env_logger::fmt::Color;
 use std::io::Write;
 
-mod client;
-mod mixer;
-mod music;
-mod server;
-mod util;
-
-use client::ClientState;
-use music::MusicClientState;
-use server::{Clipping, ServerConfig, ServerState};
+use voudp::{
+    client::ClientState, music::MusicClientState, server::Clipping, server::ServerConfig,
+    server::ServerState,
+};
 
 /// A lightweight UDP VoIP system with server/client/music modes
 #[derive(Parser)]
@@ -97,8 +92,6 @@ enum Mode {
 }
 
 fn main() -> Result<()> {
-    init_logger();
-
     let cli = Cli::parse();
 
     match cli.mode {
@@ -142,7 +135,7 @@ fn main() -> Result<()> {
                 sample_rate,
                 tickrate,
             };
-
+            init_logger();
             let mut server = ServerState::new(config)?;
             server.run();
         }
