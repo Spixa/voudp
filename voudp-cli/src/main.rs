@@ -6,8 +6,9 @@ use pretty_env_logger::env_logger::fmt::Color;
 use std::io::Write;
 
 use voudp::{
-    client::ClientState, music::MusicClientState, server::Clipping, server::ServerConfig,
-    server::ServerState,
+    client::{self, ClientState},
+    music::MusicClientState,
+    server::{Clipping, ServerConfig, ServerState},
 };
 
 /// A lightweight UDP VoIP system with server/client/music modes
@@ -97,7 +98,7 @@ fn main() -> Result<()> {
     match cli.mode {
         Mode::Client { connect } => {
             let mut client = ClientState::new(&connect)?;
-            client.run()?;
+            client.run(client::Mode::Repl)?;
         }
 
         Mode::Music { connect, file } => {
