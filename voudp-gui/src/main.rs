@@ -1,6 +1,6 @@
 use anyhow::Result;
 use eframe::{NativeOptions, egui};
-use egui::RichText;
+use egui::{Color32, RichText};
 use log::info;
 use std::{
     sync::{Arc, Mutex},
@@ -31,24 +31,34 @@ fn main() -> Result<()> {
 
 struct GuiClientApp {
     address: String,
+    chan_id_text: String,
     is_connected: bool,
     muted: bool,
     deafened: bool,
     show_help: bool,
     client: Option<Arc<Mutex<ClientState>>>,
     client_thread: Option<JoinHandle<()>>,
+    error: ErrorWindow,
+}
+
+#[derive(Default)]
+struct ErrorWindow {
+    show: bool,
+    message: String,
 }
 
 impl Default for GuiClientApp {
     fn default() -> Self {
         Self {
             address: "127.0.0.1:37549".to_string(),
+            chan_id_text: "1".to_string(),
             is_connected: false,
             muted: false,
             deafened: false,
             show_help: false,
             client: None,
             client_thread: None,
+            error: Default::default(),
         }
     }
 }
@@ -56,6 +66,26 @@ impl Default for GuiClientApp {
 impl eframe::App for GuiClientApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
+            if self.error.show {
+                egui::Window::new(egui::RichText::new("Connection Error").color(Color32::WHITE))
+                    .collapsible(false)
+                    .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, -50.0])
+                    .show(ctx, |ui| {
+                        ui.label(egui::RichText::new(&self.error.message).color(Color32::RED));
+                        ui.separator();
+
+                        ui.horizontal(|ui| {
+                            if ui
+                                .button(egui::RichText::new("Go back").color(Color32::LIGHT_GRAY))
+                                .clicked()
+                            {
+                                self.error.show = false;
+                            }
+                        });
+                    });
+            }
+
             let available = ui.available_size();
 
             egui::ScrollArea::vertical().show(ui, |ui| {
@@ -69,7 +99,18 @@ impl eframe::App for GuiClientApp {
                         if !self.is_connected {
                             ui.vertical_centered(|ui| {
                                 ui.label("🔌 Server Address:");
-                                ui.text_edit_singleline(&mut self.address);
+
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.address)
+                                        .hint_text("server address (ip:port)"),
+                                );
+                                ui.label("🔌 Channel ID:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.chan_id_text)
+                                        .hint_text("ID")
+                                        .char_limit(2)
+                                        .desired_width(20.0),
+                                );
                             });
                         }
 
@@ -77,7 +118,16 @@ impl eframe::App for GuiClientApp {
 
                         if !self.is_connected {
                             if ui.button("🔗 Connect").clicked() {
-                                match ClientState::new(&self.address) {
+                                let chan_id = match self.chan_id_text.parse::<u32>() {
+                                    Ok(num) => num,
+                                    Err(_) => {
+                                        self.error.show = true;
+                                        self.error.message = "Bad channel ID".into();
+                                        return;
+                                    }
+                                };
+
+                                match ClientState::new(&self.address, chan_id) {
                                     Ok(state) => {
                                         info!("Connected to server at {}", self.address);
                                         let arc_state = Arc::new(Mutex::new(state));

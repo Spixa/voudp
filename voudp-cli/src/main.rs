@@ -37,12 +37,12 @@ enum Mode {
         max_users: usize,
 
         /// Whether to normalize incoming audio
-        #[clap(long, default_value_t = true)]
-        normalize: bool,
+        #[clap(long)]
+        no_normalize: bool,
 
         /// Whether to apply compression
-        #[clap(long, default_value_t = true)]
-        compress: bool,
+        #[clap(long)]
+        no_compress: bool,
 
         /// Compression threshold
         #[clap(long, default_value_t = 0.5)]
@@ -78,6 +78,10 @@ enum Mode {
         /// Address to connect to (e.g., 127.0.0.1:37549)
         #[clap(long)]
         connect: String,
+
+        /// ID of the channel to connect to
+        #[clap(long, default_value_t = 1)]
+        channel_id: u32,
     },
 
     /// Start a client that streams audio from a file
@@ -85,6 +89,10 @@ enum Mode {
         /// Address to connect to
         #[clap(long)]
         connect: String,
+
+        /// ID of the channel to connect to
+        #[clap(long, default_value_t = 1)]
+        channel_id: u32,
 
         /// Path to file to stream
         #[clap(long)]
@@ -96,21 +104,28 @@ fn main() -> Result<()> {
     let cli = Cli::parse();
 
     match cli.mode {
-        Mode::Client { connect } => {
-            let mut client = ClientState::new(&connect)?;
+        Mode::Client {
+            connect,
+            channel_id,
+        } => {
+            let mut client = ClientState::new(&connect, channel_id)?;
             client.run(client::Mode::Repl)?;
         }
 
-        Mode::Music { connect, file } => {
-            let mut client = MusicClientState::new(&connect)?;
+        Mode::Music {
+            connect,
+            channel_id,
+            file,
+        } => {
+            let mut client = MusicClientState::new(&connect, channel_id)?;
             client.run(file)?;
         }
 
         Mode::Server {
             port,
             max_users,
-            normalize,
-            compress,
+            no_normalize,
+            no_compress,
             compress_threshold,
             compress_ratio,
             hard_clip,
@@ -122,8 +137,8 @@ fn main() -> Result<()> {
             let config = ServerConfig {
                 bind_port: port,
                 max_users,
-                should_normalize: normalize,
-                should_compress: compress,
+                should_normalize: !no_normalize,
+                should_compress: !no_compress,
                 compress_threshold,
                 compress_ratio,
                 clipping: if hard_clip {

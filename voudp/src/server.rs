@@ -13,10 +13,9 @@ use std::{
 };
 
 use crate::mixer;
-const JITTER_BUFFER_LEN: usize = 10;
+const JITTER_BUFFER_LEN: usize = 50;
 
 #[derive(Clone, Copy)]
-#[allow(unused)]
 pub enum Clipping {
     Soft,
     Hard,
@@ -77,7 +76,7 @@ impl Remote {
         let decoder = Decoder::new(sample_rate, OpusChannels::Stereo)?;
 
         info!(
-            "New client has initialized with addr {} (sample rate: {}, audio: {})",
+            "New remote has initialized with addr {} (sample rate: {}, audio: {})",
             addr, sample_rate, "Stereo"
         );
         Ok(Self {
@@ -321,7 +320,7 @@ impl ServerState {
 
     fn handle_mask(&mut self, addr: SocketAddr, data: &[u8]) {
         let Some(remote) = self.remotes.get(&addr) else {
-            warn!("mask from unknown client: {}, skipping request...", addr);
+            warn!("mask from unknown remote: {}, skipping request...", addr);
             return;
         };
 

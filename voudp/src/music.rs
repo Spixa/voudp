@@ -24,26 +24,26 @@ const TARGET_SAMPLE_RATE: u32 = 48_000;
 const FRAME_SIZE: usize = 960; // 20ms at 48kHz
 const FRAME_DURATION: Duration = Duration::from_millis(20);
 const CHANNELS: usize = 2; // Stereo
-const CHANNEL_ID: u32 = 1;
 
 pub struct MusicClientState {
     socket: UdpSocket,
+    channel_id: u32,
 }
 
 impl MusicClientState {
-    pub fn new(addr: &str) -> Result<Self> {
+    pub fn new(addr: &str, channel_id: u32) -> Result<Self> {
         let socket = UdpSocket::bind("0.0.0.0:0")?;
         socket.connect(addr)?;
         socket.set_nonblocking(true)?;
 
-        Ok(Self { socket })
+        Ok(Self { socket, channel_id })
     }
 
     pub fn run(&mut self, path: String) -> Result<()> {
         let mut join_packet = vec![0x01];
-        join_packet.extend_from_slice(&CHANNEL_ID.to_be_bytes());
+        join_packet.extend_from_slice(&self.channel_id.to_be_bytes());
         self.socket.send(&join_packet)?;
-        println!("joined channel {}", CHANNEL_ID);
+        println!("joined channel {}", self.channel_id);
 
         let mut opus_encoder = Encoder::new(
             TARGET_SAMPLE_RATE,
@@ -51,7 +51,7 @@ impl MusicClientState {
             opus::Application::Audio,
         )?;
 
-        opus_encoder.set_bitrate(Bitrate::Bits(128000))?;
+        opus_encoder.set_bitrate(Bitrate::Bits(96000))?;
 
         // open and decode file
         let mut file = File::open(path)?;
