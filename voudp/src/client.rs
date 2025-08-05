@@ -11,7 +11,6 @@ use std::time::Duration;
 
 use crate::util;
 
-const CHANNEL_ID: u32 = 1;
 const TARGET_FRAME_SIZE: usize = 960; // 20ms at 48kHz
 const BUFFER_CAPACITY: usize = TARGET_FRAME_SIZE * 10; // 10 frames
 
@@ -25,10 +24,11 @@ pub struct ClientState {
     muted: Arc<AtomicBool>,
     deafened: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
+    channel_id: Arc<Mutex<u32>>,
 }
 
 impl ClientState {
-    pub fn new(ip: &str) -> Result<Self, io::Error> {
+    pub fn new(ip: &str, channel_id: u32) -> Result<Self, io::Error> {
         let socket = UdpSocket::bind("0.0.0.0:0")?; // let OS decide port
         socket.connect(ip)?;
         socket.set_nonblocking(true)?;
@@ -38,13 +38,15 @@ impl ClientState {
             muted: Arc::new(AtomicBool::new(false)),
             deafened: Arc::new(AtomicBool::new(false)),
             connected: Arc::new(AtomicBool::new(true)),
+            channel_id: Arc::new(Mutex::new(channel_id)),
         })
     }
 
     pub fn run(&mut self, mode: Mode) -> Result<()> {
         let join_packet = {
+            let id = self.channel_id.lock().unwrap();
             let mut p = vec![0x01];
-            p.extend_from_slice(&CHANNEL_ID.to_be_bytes());
+            p.extend_from_slice(&id.to_be_bytes());
             p
         };
 
@@ -104,36 +106,61 @@ impl ClientState {
         let input_device = host.default_input_device().context("no input device")?;
         let output_device = host.default_output_device().context("no output device")?;
 
+        let supported = input_device.supported_input_configs()?;
+
+        let config_range = supported
+            .filter(|c| c.min_sample_rate().0 <= 48000 && c.max_sample_rate().0 >= 48000)
+            .find(|c| c.sample_format() == cpal::SampleFormat::F32)
+            .ok_or_else(|| anyhow::anyhow!("No supported config with 48kHz and f32 format"))?;
+
+        let channels = config_range.channels();
         let config = cpal::StreamConfig {
-            channels: 1,
+            channels,
             sample_rate: cpal::SampleRate(48000),
             buffer_size: cpal::BufferSize::Default,
         };
 
         let input_clone = Arc::clone(&input_buffer);
-        let input_stream = input_device.build_input_stream(
-            &config,
-            move |data: &[f32], _| {
-                let mut buffer = input_clone.lock().unwrap();
-                for sample in data {
-                    if buffer.len() >= BUFFER_CAPACITY * 2 {
-                        buffer.pop_front();
-                        buffer.pop_front();
-                    }
+        let input_stream = input_device
+            .build_input_stream(
+                &config,
+                move |data: &[f32], _| {
+                    let mut buffer = input_clone.lock().unwrap();
+                    if channels == 1 {
+                        for sample in data {
+                            if buffer.len() >= BUFFER_CAPACITY * 2 {
+                                buffer.pop_front();
+                                buffer.pop_front();
+                            }
 
-                    if !muted.load(Ordering::Relaxed) {
-                        let processed = (sample * 0.8).tanh();
-                        buffer.push_back(processed);
-                        buffer.push_back(processed);
-                    } else {
-                        buffer.push_back(0.0);
-                        buffer.push_back(0.0);
+                            if !muted.load(Ordering::Relaxed) {
+                                let processed = (sample * 0.8).tanh();
+                                buffer.push_back(processed);
+                                buffer.push_back(processed);
+                            } else {
+                                buffer.push_back(0.0);
+                                buffer.push_back(0.0);
+                            }
+                        }
+                    } else if channels == 2 {
+                        for sample in data {
+                            if buffer.len() >= BUFFER_CAPACITY {
+                                buffer.pop_front();
+                            }
+
+                            if !muted.load(Ordering::Relaxed) {
+                                let processed = (sample * 0.8).tanh();
+                                buffer.push_back(processed);
+                            } else {
+                                buffer.push_back(0.0);
+                            }
+                        }
                     }
-                }
-            },
-            |err| eprintln!("input stream error: {err:?}"),
-            None,
-        )?;
+                },
+                |err| eprintln!("input stream error: {err:?}"),
+                None,
+            )
+            .context("building input stream failed")?;
 
         let output_config = cpal::StreamConfig {
             channels: 2,
@@ -142,28 +169,32 @@ impl ClientState {
         };
 
         let output_clone = Arc::clone(&output_buffer);
-        let output_stream = output_device.build_output_stream(
-            &output_config,
-            move |data: &mut [f32], _| {
-                let mut buffer = output_clone.lock().unwrap();
-                for sample in data {
-                    *sample = if !deafened.load(Ordering::Relaxed) {
-                        buffer.pop_front().unwrap_or(0.0)
-                    } else {
-                        0.0
-                    };
-                }
-            },
-            |err| eprintln!("output stream error: {err:?}"),
-            None,
-        )?;
+        let output_stream = output_device
+            .build_output_stream(
+                &output_config,
+                move |data: &mut [f32], _| {
+                    let mut buffer = output_clone.lock().unwrap();
+                    for sample in data {
+                        *sample = if !deafened.load(Ordering::Relaxed) {
+                            buffer.pop_front().unwrap_or(0.0)
+                        } else {
+                            0.0
+                        };
+                    }
+                },
+                |err| eprintln!("output stream error: {err:?}"),
+                None,
+            )
+            .context("building output stream failed")?;
 
         input_stream.play()?;
         output_stream.play()?;
 
         match mode {
             Mode::Gui => {
-                while connected.load(Ordering::Relaxed) {}
+                while connected.load(Ordering::Relaxed) {
+                    thread::sleep(Duration::from_millis(5));
+                }
                 Ok(())
             }
             Mode::Repl => Self::repl(socket, muted_clone, deafened_clone),
@@ -177,7 +208,7 @@ impl ClientState {
     ) {
         let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
         let mut decoder = Decoder::new(48000, Channels::Stereo).unwrap();
-        encoder.set_bitrate(opus::Bitrate::Bits(128000)).unwrap();
+        encoder.set_bitrate(opus::Bitrate::Bits(96000)).unwrap();
 
         let mut recv_buf = [0u8; 2048];
         let mut frame_buf = vec![0.0f32; TARGET_FRAME_SIZE * 2];
