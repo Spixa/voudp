@@ -1,10 +1,12 @@
 use anyhow::{Context, Result};
+use chrono::{DateTime, Local};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use opus::{Application, Channels, Decoder, Encoder};
 use std::collections::VecDeque;
 use std::io;
 use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -26,7 +28,10 @@ pub struct ClientState {
     connected: Arc<AtomicBool>,
     channel_id: Arc<Mutex<u32>>,
     pub list: SafeChannelList,
+    pub rx: Option<Receiver<OwnedMessage>>,
 }
+
+type OwnedMessage = (String, String, DateTime<Local>);
 
 #[derive(Default)]
 pub struct ChannelList {
@@ -49,6 +54,7 @@ impl ClientState {
             connected: Arc::new(AtomicBool::new(true)),
             channel_id: Arc::new(Mutex::new(channel_id)),
             list: Default::default(),
+            rx: None,
         })
     }
 
@@ -66,10 +72,13 @@ impl ClientState {
         let connected = self.connected.clone();
         let list = self.list.clone();
 
+        let (tx, rx) = mpsc::channel::<OwnedMessage>();
+
+        self.rx = Some(rx);
         match mode {
             Mode::Repl => {
                 self.socket.send(&join_packet)?;
-                Self::start_audio(socket, muted, deafened, connected, list, mode)?;
+                Self::start_audio(socket, muted, deafened, connected, list, tx, mode)?;
             }
             Mode::Gui => {
                 thread::spawn(move || {
@@ -78,7 +87,7 @@ impl ClientState {
                         return;
                     }
                     if let Err(e) =
-                        Self::start_audio(socket, muted, deafened, connected, list, mode)
+                        Self::start_audio(socket, muted, deafened, connected, list, tx, mode)
                     {
                         eprintln!("audio thread error: {e:?}");
                     }
@@ -96,6 +105,7 @@ impl ClientState {
         deafened: Arc<AtomicBool>,
         connected: Arc<AtomicBool>,
         list: SafeChannelList,
+        tx: Sender<OwnedMessage>,
         mode: Mode,
     ) -> Result<()> {
         let muted_clone = muted.clone();
@@ -116,7 +126,7 @@ impl ClientState {
             let connected_clone = Arc::clone(&connected);
             let list = list.clone();
             thread::spawn(move || {
-                Self::network_thread(socket, input_clone, output_clone, list, connected_clone)
+                Self::network_thread(socket, input_clone, output_clone, list, tx, connected_clone)
             });
         }
 
@@ -227,6 +237,7 @@ impl ClientState {
         input: Arc<Mutex<VecDeque<f32>>>,
         output: Arc<Mutex<VecDeque<f32>>>,
         list: SafeChannelList,
+        tx: Sender<OwnedMessage>,
         connected: Arc<AtomicBool>,
     ) {
         let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
@@ -304,8 +315,7 @@ impl ClientState {
                 Ok((size, _)) if size > 1 && recv_buf[0] == 0x06 => {
                     match util::parse_msg_packet(&recv_buf[..size]) {
                         Ok((username, text)) => {
-                            // FIX TODO: instead of this we need to send this to via a TX and receive it on diff clients via a RX crossbeam channel type shit
-                            println!("<{}> {}", username, text);
+                            let _ = tx.send((username, text, Local::now()));
                         }
                         Err(e) => {
                             eprintln!("error: {e}");
@@ -356,7 +366,7 @@ impl ClientState {
                     let mut msg_packet = vec![0x06];
                     msg_packet.extend_from_slice(arg.as_bytes());
                     let _ = socket.send(&msg_packet);
-                    println!("");
+                    println!();
                 }
                 "n" | "nick" => {
                     if arg.is_empty() {
