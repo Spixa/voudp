@@ -114,6 +114,7 @@ impl ClientState {
             let input_clone = Arc::clone(&input_buffer);
             let output_clone = Arc::clone(&output_buffer);
             let connected_clone = Arc::clone(&connected);
+            let list = list.clone();
             thread::spawn(move || {
                 Self::network_thread(socket, input_clone, output_clone, list, connected_clone)
             });
@@ -214,7 +215,10 @@ impl ClientState {
                 }
                 Ok(())
             }
-            Mode::Repl => Self::repl(socket, muted_clone, deafened_clone),
+            Mode::Repl => {
+                let list = list.clone();
+                Self::repl(socket, muted_clone, deafened_clone, list)
+            }
         }
     }
 
@@ -284,21 +288,31 @@ impl ClientState {
                         }
                     }
                 }
-                Ok((size, _)) => {
-                    if size > 1 && recv_buf[0] == 0x05 {
-                        let packet = &recv_buf[..size];
-                        let Some(parsed) = util::parse_list_packet(packet) else {
-                            println!("error: Received bad list");
-                            continue;
-                        };
+                Ok((size, _)) if size > 1 && recv_buf[0] == 0x05 => {
+                    let packet = &recv_buf[..size];
+                    let Some(parsed) = util::parse_list_packet(packet) else {
+                        println!("error: Received bad list");
+                        continue;
+                    };
 
-                        {
-                            let mut list = list.lock().unwrap();
-                            list.masked = parsed.2;
-                            list.unmasked = parsed.0;
+                    {
+                        let mut list = list.lock().unwrap();
+                        list.masked = parsed.2;
+                        list.unmasked = parsed.0;
+                    }
+                }
+                Ok((size, _)) if size > 1 && recv_buf[0] == 0x06 => {
+                    match util::parse_msg_packet(&recv_buf[..size]) {
+                        Ok((username, text)) => {
+                            // FIX TODO: instead of this we need to send this to via a TX and receive it on diff clients via a RX crossbeam channel type shit
+                            println!("<{}> {}", username, text);
+                        }
+                        Err(e) => {
+                            eprintln!("error: {e}");
                         }
                     }
                 }
+                Ok((_, _)) => {}
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(1));
                 }
@@ -308,12 +322,17 @@ impl ClientState {
         }
     }
 
-    fn repl(socket: UdpSocket, muted: Arc<AtomicBool>, deafened: Arc<AtomicBool>) -> Result<()> {
+    fn repl(
+        socket: UdpSocket,
+        muted: Arc<AtomicBool>,
+        deafened: Arc<AtomicBool>,
+        list: SafeChannelList,
+    ) -> Result<()> {
         loop {
-            let prompt = util::ask("> ").to_lowercase();
+            let prompt = util::ask("> ");
             let (cmd, arg) = prompt.split_once(' ').unwrap_or((prompt.as_str(), ""));
             print!(":: ");
-            match cmd {
+            match cmd.to_lowercase().as_str() {
                 "q" | "quit" => {
                     println!("goodbye!");
                     break;
@@ -328,6 +347,17 @@ impl ClientState {
                     deafened.store(new, Ordering::Relaxed);
                     println!("speaker {}deafened", if new { "" } else { "un" });
                 }
+                "s" | "send" => {
+                    if arg.is_empty() {
+                        println!("empty will not be sent!");
+                        continue;
+                    }
+
+                    let mut msg_packet = vec![0x06];
+                    msg_packet.extend_from_slice(arg.as_bytes());
+                    let _ = socket.send(&msg_packet);
+                    println!("");
+                }
                 "n" | "nick" => {
                     if arg.is_empty() {
                         println!("no nick provided!");
@@ -337,6 +367,22 @@ impl ClientState {
                     nick_packet.extend_from_slice(arg.as_bytes());
                     let _ = socket.send(&nick_packet);
                     println!("you are now masked as '{}'", arg);
+                }
+                "l" | "list" => {
+                    let list = list.lock().unwrap();
+                    println!(
+                        "Unmasked: {} -- Masked: {}",
+                        list.unmasked,
+                        list.masked.len()
+                    );
+
+                    if list.masked.is_empty() {
+                        println!("Masked list: ");
+
+                        for person in list.masked.iter() {
+                            println!("\t● {person}");
+                        }
+                    }
                 }
                 "h" | "help" => {
                     println!("possible commands");
