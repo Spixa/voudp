@@ -248,7 +248,11 @@ impl ServerState {
             0x02 => self.handle_audio(addr, &data[1..]),
             0x03 => self.handle_eof(addr),
             0x04 => self.handle_mask(addr, &data[1..]),
-            _ => error!("{} sent an invalid packet", addr),
+            0x05 => self.handle_list(addr),
+            _ => error!(
+                "{} sent an invalid packet (starts with {:#?})",
+                addr, data[0]
+            ),
         }
     }
 
@@ -320,13 +324,13 @@ impl ServerState {
 
     fn handle_mask(&mut self, addr: SocketAddr, data: &[u8]) {
         let Some(remote) = self.remotes.get(&addr) else {
-            warn!("mask from unknown remote: {}, skipping request...", addr);
+            warn!("Mask from unknown remote: {}, skipping request...", addr);
             return;
         };
 
         let mut remote = remote.lock().unwrap();
         let Ok(new_mask) = String::from_utf8(data.to_vec()) else {
-            warn!("mask sent over is not UTF-8, skipping request...");
+            warn!("Mask sent over is not UTF-8, skipping request...");
             return;
         };
 
@@ -346,6 +350,63 @@ impl ServerState {
         }
 
         remote.mask(&new_mask);
+    }
+
+    fn handle_list(&mut self, addr: SocketAddr) {
+        let Some(remote) = self.remotes.get(&addr) else {
+            warn!(
+                "List request from unknown remote: {}, skipping request...",
+                addr
+            );
+            return;
+        };
+        let remote = remote.lock().unwrap();
+
+        let Some(channel) = self.channels.get(&remote.channel_id) else {
+            warn!(
+                "Failed to retrieve the channel of remote {}, skipping request...",
+                addr
+            );
+            return;
+        };
+
+        // prevent locking
+        drop(remote);
+
+        let (masked, unmasked_count): (Vec<String>, u32) = channel
+            .remotes
+            .iter()
+            .map(|r| r.lock().unwrap())
+            .fold((vec![], 0), |(mut masks, count), remote| {
+                if let Some(mask) = &remote.mask {
+                    masks.push(mask.clone());
+                    (masks, count)
+                } else {
+                    (masks, count + 1)
+                }
+            });
+
+        let mut payload: Vec<u8> = channel
+            .remotes
+            .iter()
+            .filter_map(|r| r.lock().ok()?.mask.clone())
+            .flat_map(|mask| {
+                let mut b = mask.into_bytes();
+                b.push(0x01);
+                b
+            })
+            .collect();
+
+        payload.pop();
+        //                      control                                 actual payload
+        //              ------------------------------------    ------------------------------------ ...
+        // list packet: 0x05 + unmasked count + masked count + [mask #1] + 0x01 + [mask #2] + 0x01 + ...
+        let mut list_packet = vec![0x05];
+        list_packet.extend_from_slice(&unmasked_count.to_be_bytes());
+        list_packet.extend_from_slice(&(masked.len() as u32).to_be_bytes());
+        list_packet.extend_from_slice(&payload);
+
+        self.socket.send_to(&list_packet, addr).unwrap();
     }
 
     fn process_audio_tick(&mut self) {

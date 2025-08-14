@@ -44,6 +44,8 @@ struct GuiClientApp {
     client_thread: Option<JoinHandle<()>>,
     error: ErrorWindow,
     logs: LogVec,
+    unmasked_count: u32,
+    masked_users: Vec<String>,
 }
 
 #[derive(Default)]
@@ -65,6 +67,8 @@ impl Default for GuiClientApp {
             client_thread: None,
             error: Default::default(),
             logs: Default::default(),
+            unmasked_count: 0,
+            masked_users: Vec::new(),
         }
     }
 }
@@ -171,6 +175,14 @@ impl eframe::App for GuiClientApp {
                                 }
                                 self.is_connected = false;
                                 self.client = None;
+                                self.write_log("Goodbye!".into(), Color32::GREEN);
+                                self.write_log(
+                                    format!(
+                                        "Sent EOF to {}. It is now handling our departure",
+                                        self.address
+                                    ),
+                                    Color32::YELLOW,
+                                );
                             }
 
                             ui.add_space(5.0);
@@ -200,9 +212,9 @@ impl eframe::App for GuiClientApp {
 
                             if ui
                                 .button(if self.deafened {
-                                    "🧏 Undeafen"
+                                    "🔈 Undeafen"
                                 } else {
-                                    "🔊 Deafen"
+                                    "🔇 Deafen"
                                 })
                                 .clicked()
                             {
@@ -220,12 +232,47 @@ impl eframe::App for GuiClientApp {
                                     );
                                 }
                             }
-                        }
 
+                            ui.add_space(10.0);
+                            ui.separator();
+                            ui.heading("📜 User List");
+                            ui.horizontal(|ui| {
+                                ui.label(format!("Unmasked users: {}", self.unmasked_count));
+                                ui.label(format!("Masked users: {}", self.masked_users.len()));
+                            });
+
+                            let max_height = 150.0; // adjust for ~10 lines
+                            egui::ScrollArea::vertical()
+                                .max_height(max_height)
+                                .show(ui, |ui| {
+                                    if self.masked_users.is_empty() {
+                                        ui.label("No masked users connected.");
+                                    } else {
+                                        for name in &self.masked_users {
+                                            ui.horizontal(|ui| {
+                                                // Green dot
+                                                ui.label(
+                                                    RichText::new("●")
+                                                        .color(Color32::from_rgb(0, 200, 0))
+                                                        .monospace(),
+                                                );
+                                                // Username
+                                                ui.label(name);
+                                            });
+                                        }
+                                    }
+                                });
+                        }
+                        ui.separator();
                         ui.add_space(10.0);
 
                         if ui.button("❓ Toggle Help").clicked() {
                             self.show_help = !self.show_help;
+                        }
+
+                        if ui.button("🧹 Clear Logs").clicked() {
+                            self.logs.write().unwrap().clear();
+                            self.write_log("Cleared logs".into(), Color32::WHITE);
                         }
 
                         if self.show_help {
@@ -269,6 +316,18 @@ impl eframe::App for GuiClientApp {
                         }
                     });
             });
+
+        'update_list: {
+            let Some(client) = self.client.clone() else {
+                break 'update_list;
+            };
+
+            let client = client.lock().unwrap();
+
+            let list = client.list.lock().unwrap();
+            self.unmasked_count = list.unmasked;
+            self.masked_users = list.masked.clone();
+        }
 
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
     }

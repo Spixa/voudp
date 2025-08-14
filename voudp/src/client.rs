@@ -7,7 +7,7 @@ use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use crate::util;
 
@@ -25,7 +25,16 @@ pub struct ClientState {
     deafened: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
     channel_id: Arc<Mutex<u32>>,
+    pub list: SafeChannelList,
 }
+
+#[derive(Default)]
+pub struct ChannelList {
+    pub unmasked: u32,
+    pub masked: Vec<String>,
+}
+
+type SafeChannelList = Arc<Mutex<ChannelList>>;
 
 impl ClientState {
     pub fn new(ip: &str, channel_id: u32) -> Result<Self, io::Error> {
@@ -39,6 +48,7 @@ impl ClientState {
             deafened: Arc::new(AtomicBool::new(false)),
             connected: Arc::new(AtomicBool::new(true)),
             channel_id: Arc::new(Mutex::new(channel_id)),
+            list: Default::default(),
         })
     }
 
@@ -54,11 +64,12 @@ impl ClientState {
         let muted = self.muted.clone();
         let deafened = self.deafened.clone();
         let connected = self.connected.clone();
+        let list = self.list.clone();
 
         match mode {
             Mode::Repl => {
                 self.socket.send(&join_packet)?;
-                Self::start_audio(socket, muted, deafened, connected, mode)?;
+                Self::start_audio(socket, muted, deafened, connected, list, mode)?;
             }
             Mode::Gui => {
                 thread::spawn(move || {
@@ -66,7 +77,9 @@ impl ClientState {
                         eprintln!("send error: {e:?}");
                         return;
                     }
-                    if let Err(e) = Self::start_audio(socket, muted, deafened, connected, mode) {
+                    if let Err(e) =
+                        Self::start_audio(socket, muted, deafened, connected, list, mode)
+                    {
                         eprintln!("audio thread error: {e:?}");
                     }
                 });
@@ -82,6 +95,7 @@ impl ClientState {
         muted: Arc<AtomicBool>,
         deafened: Arc<AtomicBool>,
         connected: Arc<AtomicBool>,
+        list: SafeChannelList,
         mode: Mode,
     ) -> Result<()> {
         let muted_clone = muted.clone();
@@ -99,7 +113,10 @@ impl ClientState {
             let socket = socket.try_clone()?;
             let input_clone = Arc::clone(&input_buffer);
             let output_clone = Arc::clone(&output_buffer);
-            thread::spawn(move || Self::network_thread(socket, input_clone, output_clone));
+            let connected_clone = Arc::clone(&connected);
+            thread::spawn(move || {
+                Self::network_thread(socket, input_clone, output_clone, list, connected_clone)
+            });
         }
 
         let host = cpal::default_host();
@@ -205,6 +222,8 @@ impl ClientState {
         socket: UdpSocket,
         input: Arc<Mutex<VecDeque<f32>>>,
         output: Arc<Mutex<VecDeque<f32>>>,
+        list: SafeChannelList,
+        connected: Arc<AtomicBool>,
     ) {
         let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
         let mut decoder = Decoder::new(48000, Channels::Stereo).unwrap();
@@ -213,8 +232,19 @@ impl ClientState {
         let mut recv_buf = [0u8; 2048];
         let mut frame_buf = vec![0.0f32; TARGET_FRAME_SIZE * 2];
 
+        let mut test = Instant::now();
         loop {
+            if !connected.load(Ordering::Relaxed) {
+                break;
+            }
+
             // send
+            if test.elapsed() > Duration::from_secs(1) {
+                let list_packet = vec![0x05];
+                socket.send(&list_packet).unwrap();
+                test = Instant::now();
+            }
+
             {
                 let mut buffer = input.lock().unwrap();
                 while buffer.len() >= TARGET_FRAME_SIZE * 2 {
@@ -254,7 +284,21 @@ impl ClientState {
                         }
                     }
                 }
-                Ok((_, _)) => {}
+                Ok((size, _)) => {
+                    if size > 1 && recv_buf[0] == 0x05 {
+                        let packet = &recv_buf[..size];
+                        let Some(parsed) = util::parse_list_packet(packet) else {
+                            println!("error: Received bad list");
+                            continue;
+                        };
+
+                        {
+                            let mut list = list.lock().unwrap();
+                            list.masked = parsed.2;
+                            list.unmasked = parsed.0;
+                        }
+                    }
+                }
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(1));
                 }
