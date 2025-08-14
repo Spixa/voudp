@@ -1,9 +1,11 @@
 use anyhow::Result;
+use chrono::{DateTime, Local};
+use core::f32;
 use eframe::{NativeOptions, egui};
 use egui::{Color32, RichText};
 use log::info;
 use std::{
-    sync::{Arc, Mutex},
+    sync::{Arc, Mutex, RwLock},
     thread::JoinHandle,
 };
 use voudp::client::{self, ClientState};
@@ -29,6 +31,8 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+type LogVec = Arc<RwLock<Vec<(String, egui::Color32, DateTime<Local>)>>>;
+
 struct GuiClientApp {
     address: String,
     chan_id_text: String,
@@ -39,6 +43,7 @@ struct GuiClientApp {
     client: Option<Arc<Mutex<ClientState>>>,
     client_thread: Option<JoinHandle<()>>,
     error: ErrorWindow,
+    logs: LogVec,
 }
 
 #[derive(Default)]
@@ -59,30 +64,29 @@ impl Default for GuiClientApp {
             client: None,
             client_thread: None,
             error: Default::default(),
+            logs: Default::default(),
         }
     }
 }
 
 impl eframe::App for GuiClientApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        // Main panel for UI
         egui::CentralPanel::default().show(ctx, |ui| {
             if self.error.show {
-                egui::Window::new(egui::RichText::new("Connection Error").color(Color32::WHITE))
+                egui::Window::new(RichText::new("Connection Error").color(Color32::WHITE))
                     .collapsible(false)
                     .resizable(false)
                     .anchor(egui::Align2::CENTER_CENTER, [0.0, -50.0])
                     .show(ctx, |ui| {
-                        ui.label(egui::RichText::new(&self.error.message).color(Color32::RED));
+                        ui.label(RichText::new(&self.error.message).color(Color32::RED));
                         ui.separator();
-
-                        ui.horizontal(|ui| {
-                            if ui
-                                .button(egui::RichText::new("Go back").color(Color32::LIGHT_GRAY))
-                                .clicked()
-                            {
-                                self.error.show = false;
-                            }
-                        });
+                        if ui
+                            .button(RichText::new("Go back").color(Color32::LIGHT_GRAY))
+                            .clicked()
+                        {
+                            self.error.show = false;
+                        }
                     });
             }
 
@@ -96,27 +100,23 @@ impl eframe::App for GuiClientApp {
                         ui.heading(RichText::new("VoUDP GUI Client"));
                         ui.add_space(10.0);
 
+                        // Connection UI
                         if !self.is_connected {
-                            ui.vertical_centered(|ui| {
-                                ui.label("🔌 Server Address:");
+                            ui.label("🔌 Server Address:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.address)
+                                    .hint_text("server address (ip:port)"),
+                            );
+                            ui.label("🔌 Channel ID:");
+                            ui.add(
+                                egui::TextEdit::singleline(&mut self.chan_id_text)
+                                    .hint_text("ID")
+                                    .char_limit(2)
+                                    .desired_width(20.0),
+                            );
 
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.address)
-                                        .hint_text("server address (ip:port)"),
-                                );
-                                ui.label("🔌 Channel ID:");
-                                ui.add(
-                                    egui::TextEdit::singleline(&mut self.chan_id_text)
-                                        .hint_text("ID")
-                                        .char_limit(2)
-                                        .desired_width(20.0),
-                                );
-                            });
-                        }
+                            ui.add_space(10.0);
 
-                        ui.add_space(10.0);
-
-                        if !self.is_connected {
                             if ui.button("🔗 Connect").clicked() {
                                 let chan_id = match self.chan_id_text.parse::<u32>() {
                                     Ok(num) => num,
@@ -130,6 +130,19 @@ impl eframe::App for GuiClientApp {
                                 match ClientState::new(&self.address, chan_id) {
                                     Ok(state) => {
                                         info!("Connected to server at {}", self.address);
+
+                                        self.write_log(
+                                            format!(
+                                                "Connected to {} in channel {}",
+                                                self.address, chan_id
+                                            ),
+                                            Color32::YELLOW,
+                                        );
+                                        self.write_log(
+                                            "Hope you enjoy your stay".into(),
+                                            Color32::GREEN,
+                                        );
+
                                         let arc_state = Arc::new(Mutex::new(state));
                                         let thread_state = arc_state.clone();
 
@@ -174,6 +187,15 @@ impl eframe::App for GuiClientApp {
                                 if let Some(client) = &self.client {
                                     client.lock().unwrap().set_muted(self.muted);
                                 }
+
+                                if self.muted {
+                                    self.write_log("Microphone muted".into(), Color32::RED);
+                                } else {
+                                    self.write_log(
+                                        "Microphone unmuted".into(),
+                                        Color32::LIGHT_GREEN,
+                                    );
+                                }
                             }
 
                             if ui
@@ -187,6 +209,15 @@ impl eframe::App for GuiClientApp {
                                 self.deafened = !self.deafened;
                                 if let Some(client) = &self.client {
                                     client.lock().unwrap().set_deafened(self.deafened);
+                                }
+
+                                if self.deafened {
+                                    self.write_log("Speaker deafened".into(), Color32::RED);
+                                } else {
+                                    self.write_log(
+                                        "Speaker undeafened".into(),
+                                        Color32::LIGHT_GREEN,
+                                    );
                                 }
                             }
                         }
@@ -209,6 +240,42 @@ impl eframe::App for GuiClientApp {
             });
         });
 
+        egui::TopBottomPanel::bottom("logs")
+            .resizable(false)
+            .default_height(150.0)
+            .show(ctx, |ui| {
+                egui::ScrollArea::vertical()
+                    .stick_to_bottom(true)
+                    .auto_shrink([false; 2])
+                    .max_width(f32::INFINITY)
+                    .show(ui, |ui| {
+                        for (msg, color, time) in self.logs.read().unwrap().iter() {
+                            ui.horizontal(|ui| {
+                                // borrowed from opensimp 3 desktop client
+                                ui.label(
+                                    egui::RichText::new(format!("{}  ", time.format("%H:%M:%S")))
+                                        .color(egui::Color32::GRAY)
+                                        .monospace(),
+                                );
+                                ui.add(
+                                    egui::Label::new(
+                                        egui::RichText::new(msg)
+                                            .text_style(egui::TextStyle::Monospace)
+                                            .color(*color),
+                                    )
+                                    .wrap(true),
+                                );
+                            });
+                        }
+                    });
+            });
+
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
+    }
+}
+
+impl GuiClientApp {
+    fn write_log(&mut self, log: String, color: Color32) {
+        self.logs.write().unwrap().push((log, color, Local::now()));
     }
 }
