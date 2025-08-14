@@ -319,6 +319,9 @@ impl ClientState {
     }
 
     pub fn disconnect(&self) {
+        let leave = vec![0x03];
+        self.socket.send(&leave).unwrap();
+
         self.connected.store(false, Ordering::Relaxed);
     }
 }
