@@ -5,8 +5,8 @@ use eframe::{NativeOptions, egui};
 use egui::{Color32, RichText};
 use log::info;
 use std::{
-    sync::{Arc, Mutex, RwLock},
-    thread::JoinHandle,
+    sync::{Arc, Mutex, RwLock, mpsc::TryRecvError},
+    thread::{self, JoinHandle},
 };
 use voudp::client::{self, ClientState};
 
@@ -327,6 +327,30 @@ impl eframe::App for GuiClientApp {
             let list = client.list.lock().unwrap();
             self.unmasked_count = list.unmasked;
             self.masked_users = list.masked.clone();
+        }
+
+        'update_chat: {
+            let Some(client) = self.client.clone() else {
+                break 'update_chat;
+            };
+
+            let client = client.lock().unwrap();
+
+            let Some(ref rx) = client.rx else {
+                break 'update_chat;
+            };
+
+            match rx.try_recv() {
+                Ok((name, msg, time)) => {
+                    self.logs.write().unwrap().push((
+                        format!("{name}: {msg}"),
+                        Color32::WHITE,
+                        time,
+                    ));
+                }
+                Err(TryRecvError::Empty) => thread::yield_now(),
+                Err(TryRecvError::Disconnected) => {}
+            }
         }
 
         ctx.request_repaint_after(std::time::Duration::from_millis(16));
