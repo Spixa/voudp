@@ -249,6 +249,7 @@ impl ServerState {
             0x03 => self.handle_eof(addr),
             0x04 => self.handle_mask(addr, &data[1..]),
             0x05 => self.handle_list(addr),
+            0x06 => self.handle_chat(addr, &data[1..]),
             _ => error!(
                 "{} sent an invalid packet (starts with {:#?})",
                 addr, data[0]
@@ -407,6 +408,56 @@ impl ServerState {
         list_packet.extend_from_slice(&payload);
 
         self.socket.send_to(&list_packet, addr).unwrap();
+    }
+
+    fn handle_chat(&mut self, addr: SocketAddr, data: &[u8]) {
+        let (mask, chan_id) = {
+            let Some(remote) = self.remotes.get(&addr) else {
+                warn!(
+                    "Chat request from unknown remote: {}, skipping request...",
+                    addr
+                );
+                return;
+            };
+            let remote = remote.lock().unwrap();
+
+            (remote.mask.clone(), remote.channel_id)
+        };
+
+        let Some(channel) = self.channels.get(&chan_id) else {
+            warn!(
+                "Failed to retrieve the channel of remote {}, skipping request...",
+                addr
+            );
+            return;
+        };
+
+        match mask {
+            Some(mask) => {
+                let Ok(msg) = String::from_utf8(data.to_vec()) else {
+                    warn!("{addr} sent a non UTF-8 encoded chat string");
+                    return;
+                };
+
+                for remote in channel.remotes.iter() {
+                    let addr = { remote.lock().unwrap().addr };
+
+                    let mut msg_packet = vec![0x06];
+                    msg_packet.extend_from_slice(mask.as_bytes());
+                    msg_packet.extend([0x01]);
+                    msg_packet.extend_from_slice(data);
+
+                    let _ = self.socket.send_to(&msg_packet, addr);
+                }
+
+                info!("[#chan-{}] <{}> {}", chan_id, mask, msg);
+            }
+            None => {
+                let unauth_packet = vec![0x07];
+                let _ = self.socket.send_to(&unauth_packet, addr);
+                warn!("{addr} tried sending chat message without having a mask!");
+            }
+        }
     }
 
     fn process_audio_tick(&mut self) {

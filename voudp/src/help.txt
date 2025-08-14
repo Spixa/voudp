@@ -1,5 +1,7 @@
 m/mute: mute microphone
+s/send: send message (requires nick)
 d/deaf: deafen speaker
 q/quit: quit server
 h/help: get this page
 n/nick: set nick/mask
+l/list: get list

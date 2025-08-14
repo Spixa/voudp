@@ -241,7 +241,7 @@ impl eframe::App for GuiClientApp {
                                 ui.label(format!("Masked users: {}", self.masked_users.len()));
                             });
 
-                            let max_height = 150.0; // adjust for ~10 lines
+                            let max_height = 30.0; // adjust for ~10 lines
                             egui::ScrollArea::vertical()
                                 .max_height(max_height)
                                 .show(ui, |ui| {
