@@ -48,7 +48,7 @@ struct GuiClientApp {
     nicked: bool,
     logs: LogVec,
     unmasked_count: u32,
-    masked_users: Vec<String>,
+    masked_users: Vec<(String, bool, bool)>,
 }
 
 #[derive(Default)]
@@ -112,8 +112,10 @@ impl eframe::App for GuiClientApp {
                     .resizable(false)
                     .show(ctx, |ui| {
                         ui.label("🔌 Enter nickname:");
-                        ui.add(egui::TextEdit::singleline(&mut self.nick).hint_text("Nickname"));
+                        let textedit = ui
+                            .add(egui::TextEdit::singleline(&mut self.nick).hint_text("Nickname"));
 
+                        ui.memory_mut(|mem| mem.request_focus(textedit.id));
                         if ui
                             .button(RichText::new("Use nickname").color(Color32::LIGHT_GREEN))
                             .clicked()
@@ -211,14 +213,25 @@ impl eframe::App for GuiClientApp {
                         if self.masked_users.is_empty() {
                             ui.label("No masked users connected.");
                         } else {
-                            for name in &self.masked_users {
+                            for (name, muted, deafened) in &self.masked_users {
                                 ui.horizontal(|ui| {
+                                    // Connection dot
                                     ui.label(
                                         RichText::new("●")
                                             .color(Color32::from_rgb(0, 200, 0))
                                             .monospace(),
                                     );
-                                    ui.label(name);
+
+                                    // Name
+                                    ui.label(RichText::new(name).strong());
+
+                                    // Status icons / text
+                                    if *muted {
+                                        ui.label(RichText::new("🔇").size(14.0)); // muted icon
+                                    }
+                                    if *deafened {
+                                        ui.label(RichText::new("🙉").size(14.0)); // deafened icon
+                                    }
                                 });
                             }
                         }
@@ -417,7 +430,7 @@ impl GuiClientApp {
         let mut msg = vec![0x06];
         msg.extend_from_slice(self.input.as_bytes());
 
-        let mut client = match &self.client {
+        let client = match &self.client {
             Some(client) => client.lock().unwrap(),
             None => return,
         };
@@ -430,7 +443,7 @@ impl GuiClientApp {
         let mut nick = vec![0x04];
         nick.extend_from_slice(self.nick.as_bytes());
 
-        let mut client = match &self.client {
+        let client = match &self.client {
             Some(client) => client.lock().unwrap(),
             None => return,
         };
