@@ -1,5 +1,5 @@
 Here is going to be a shortened version of the specification of VoUDP:
-Note: all u32 are BIG ENDIAN. () represents a byte for reference. ... means variable in size
+Note: all u32 are BIG ENDIAN. () represents a byte for reference. ... means variable in size. {} means repeated per client
 
 Join packet:
     C2S: 5 bytes
@@ -19,7 +19,7 @@ Mask packet: (AKA: Nick packet)
 
 List Packet:
     S2C: > 9 bytes
-        [0x05 ()] + { [UTF-8 encoded string ...] + [0x01 delimiter ()] + [0x000000md (m: mute, d: deaf) flags ()]} + [0x01 delimiter ()] + {another block of this per client}
+        [0x05 ()] + [unmasked_count ()()()()] + [masked_count ()()()()] { [UTF-8 encoded string (mask)...] + [0x01 delimiter ()] + [0x000000md (m: mute, d: deaf) flags ()]} + [0x01 delimiter ()]
 
 Chat Packet:
     C2S: > 1 byte
