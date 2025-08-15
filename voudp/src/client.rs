@@ -424,4 +424,8 @@ impl ClientState {
 
         self.connected.store(false, Ordering::Relaxed);
     }
+
+    pub fn send(&mut self, packet: &[u8]) {
+        let _ = self.socket.send(packet);
+    }
 }
