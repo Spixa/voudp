@@ -15,7 +15,7 @@ use std::{
 use crate::mixer;
 const JITTER_BUFFER_LEN: usize = 50;
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq)]
 pub enum Clipping {
     Soft,
     Hard,
@@ -549,6 +549,21 @@ impl ServerState {
             )
         } else {
             info!("Audio compression is disabled");
+        }
+
+        if self.config.should_normalize {
+            info!("Audio normalization is enabled");
+        } else {
+            info!("Audio normalization is disabled");
+        }
+
+        if !self.config.should_compress
+            && !self.config.should_normalize
+            && self.config.clipping == Clipping::Hard
+        {
+            warn!(
+                "This setting is not recommended (No compression, no normalization, with hard clipping)"
+            );
         }
 
         match self.config.clipping {
