@@ -12,23 +12,34 @@ pub fn ask(prompt: &str) -> String {
     answer.trim().into()
 }
 
-pub fn parse_list_packet(bytes: &[u8]) -> Option<(u32, u32, Vec<String>)> {
+pub fn parse_list_packet(bytes: &[u8]) -> Option<(u32, u32, Vec<(String, bool, bool)>)> {
     if bytes.len() < 9 || bytes[0] != 0x05 {
-        return None; // invalid packet
+        return None;
     }
 
-    let unmasked_count = u32::from_be_bytes(bytes[1..5].try_into().unwrap());
-    let masked_count = u32::from_be_bytes(bytes[5..9].try_into().unwrap());
+    let unmasked_count = u32::from_be_bytes(bytes[1..5].try_into().ok()?);
+    let masked_count = u32::from_be_bytes(bytes[5..9].try_into().ok()?);
 
     let mut masks = Vec::new();
-    let mask_data = &bytes[9..];
+    let mut i = 9;
 
-    for part in mask_data.split(|&b| b == 0x01) {
-        if !part.is_empty() {
-            if let Ok(s) = String::from_utf8(part.to_vec()) {
-                masks.push(s);
-            }
+    for _ in 0..masked_count {
+        // Find string terminator
+        let sep_pos = bytes[i..].iter().position(|&b| b == 0x01)?;
+        let mask_str = String::from_utf8(bytes[i..i + sep_pos].to_vec()).ok()?;
+        i += sep_pos + 1; // move past mask + separator
+
+        // Read flags
+        if i >= bytes.len() {
+            return None;
         }
+        let flags = bytes[i];
+        i += 1;
+
+        let muted = flags & 0b00000001 != 0;
+        let deafened = flags & 0b00000010 != 0;
+
+        masks.push((mask_str, muted, deafened));
     }
 
     Some((unmasked_count, masked_count, masks))
@@ -62,4 +73,25 @@ pub fn parse_msg_packet(data: &[u8]) -> Result<(String, String), String> {
         String::from_utf8(message_bytes.to_vec()).map_err(|_| "invalid UTF-8 in message")?;
 
     Ok((username, message))
+}
+
+pub enum ControlRequest {
+    SetDeafen,
+    SetUndeafen,
+    SetMute,
+    SetUnmute,
+    SetVolume(u8),
+}
+
+pub fn parse_control_packet(data: &[u8]) -> Result<ControlRequest, String> {
+    let req = match data[0] {
+        0x01 => ControlRequest::SetDeafen,
+        0x02 => ControlRequest::SetUndeafen,
+        0x03 => ControlRequest::SetMute,
+        0x04 => ControlRequest::SetUnmute,
+        0x05 => ControlRequest::SetVolume(data[1]),
+        _ => return Err("Invalid control packet".into()),
+    };
+
+    Ok(req)
 }

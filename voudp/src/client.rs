@@ -36,7 +36,7 @@ type OwnedMessage = (String, String, DateTime<Local>);
 #[derive(Default)]
 pub struct ChannelList {
     pub unmasked: u32,
-    pub masked: Vec<String>,
+    pub masked: Vec<(String, bool, bool)>,
 }
 
 type SafeChannelList = Arc<Mutex<ChannelList>>;
@@ -350,11 +350,23 @@ impl ClientState {
                 "m" | "mute" => {
                     let new = !muted.load(Ordering::Relaxed);
                     muted.store(new, Ordering::Relaxed);
+
+                    let mut mute_packet = vec![0x08];
+                    let mode = if new { 0x03 } else { 0x04 };
+                    mute_packet.extend_from_slice(&[mode]);
+                    let _ = socket.send(&mute_packet);
+
                     println!("microphone {}muted", if new { "" } else { "un" });
                 }
                 "d" | "deaf" => {
                     let new = !deafened.load(Ordering::Relaxed);
                     deafened.store(new, Ordering::Relaxed);
+
+                    let mut deaf_packet = vec![0x08];
+                    let mode = if new { 0x01 } else { 0x02 };
+                    deaf_packet.extend_from_slice(&[mode]);
+                    let _ = socket.send(&deaf_packet);
+
                     println!("speaker {}deafened", if new { "" } else { "un" });
                 }
                 "s" | "send" => {
@@ -386,11 +398,14 @@ impl ClientState {
                         list.masked.len()
                     );
 
-                    if list.masked.is_empty() {
+                    if !list.masked.is_empty() {
                         println!("Masked list: ");
 
                         for person in list.masked.iter() {
-                            println!("\t● {person}");
+                            println!(
+                                "\t● {} (Muted: {}) (Deafened: {})",
+                                person.0, person.1, person.2
+                            );
                         }
                     }
                 }
@@ -411,10 +426,20 @@ impl ClientState {
     }
 
     pub fn set_muted(&self, muted: bool) {
+        let mut mute_packet = vec![0x08];
+        let mode = if muted { 0x03 } else { 0x04 };
+        mute_packet.extend_from_slice(&[mode]);
+        self.send(&mute_packet);
+
         self.muted.store(muted, Ordering::Relaxed);
     }
 
     pub fn set_deafened(&self, deafened: bool) {
+        let mut deaf_packet = vec![0x08];
+        let mode = if deafened { 0x01 } else { 0x02 };
+        deaf_packet.extend_from_slice(&[mode]);
+        self.send(&deaf_packet);
+
         self.deafened.store(deafened, Ordering::Relaxed);
     }
 
@@ -425,7 +450,7 @@ impl ClientState {
         self.connected.store(false, Ordering::Relaxed);
     }
 
-    pub fn send(&mut self, packet: &[u8]) {
+    pub fn send(&self, packet: &[u8]) {
         let _ = self.socket.send(packet);
     }
 }

@@ -12,7 +12,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::mixer;
+use crate::{
+    mixer,
+    util::{self, ControlRequest},
+};
 const JITTER_BUFFER_LEN: usize = 50;
 
 #[derive(Clone, Copy, PartialEq)]
@@ -60,6 +63,12 @@ impl ServerConfig {
     }
 }
 
+#[derive(Default, Clone, Copy)]
+struct RemoteStatus {
+    deaf: bool,
+    mute: bool,
+}
+
 struct Remote {
     encoder: Encoder,
     decoder: Decoder,
@@ -68,6 +77,7 @@ struct Remote {
     addr: SocketAddr,
     mask: Option<String>,
     jitter_buffer: VecDeque<Vec<f32>>,
+    status: RemoteStatus,
 }
 
 impl Remote {
@@ -87,6 +97,7 @@ impl Remote {
             addr,
             mask: None,
             jitter_buffer: VecDeque::with_capacity(JITTER_BUFFER_LEN),
+            status: Default::default(),
         })
     }
 
@@ -250,6 +261,7 @@ impl ServerState {
             0x04 => self.handle_mask(addr, &data[1..]),
             0x05 => self.handle_list(addr),
             0x06 => self.handle_chat(addr, &data[1..]),
+            0x08 => self.handle_ctrl(addr, &data[1..]),
             _ => error!(
                 "{} sent an invalid packet (starts with {:#?})",
                 addr, data[0]
@@ -371,37 +383,43 @@ impl ServerState {
             return;
         };
 
-        // prevent locking
+        // prevent locking (we will lock later)
         drop(remote);
 
-        let (masked, unmasked_count): (Vec<String>, u32) = channel
+        // TODO: make this lazy. do not compute per-request
+        let (masked, unmasked_count): (Vec<(String, bool, bool)>, u32) = channel
             .remotes
             .iter()
-            .map(|r| r.lock().unwrap())
-            .fold((vec![], 0), |(mut masks, count), remote| {
-                if let Some(mask) = &remote.mask {
-                    masks.push(mask.clone());
-                    (masks, count)
-                } else {
-                    (masks, count + 1)
-                }
-            });
-
-        let mut payload: Vec<u8> = channel
-            .remotes
-            .iter()
-            .filter_map(|r| r.lock().ok()?.mask.clone())
-            .flat_map(|mask| {
-                let mut b = mask.into_bytes();
-                b.push(0x01);
-                b
+            .map(|r| {
+                let r = r.lock().unwrap();
+                (
+                    r.mask.clone(),
+                    r.status.mute, // bool
+                    r.status.deaf, // bool
+                )
             })
-            .collect();
+            .fold(
+                (vec![], 0),
+                |(mut masks, count), (mask_opt, muted, deafened)| {
+                    if let Some(mask) = mask_opt {
+                        masks.push((mask, muted, deafened));
+                        (masks, count)
+                    } else {
+                        (masks, count + 1)
+                    }
+                },
+            );
 
-        payload.pop();
-        //                      control                                 actual payload
-        //              ------------------------------------    ------------------------------------ ...
-        // list packet: 0x05 + unmasked count + masked count + [mask #1] + 0x01 + [mask #2] + 0x01 + ...
+        // build payload
+        let mut payload = Vec::new();
+        for (mask, muted, deafened) in &masked {
+            payload.extend_from_slice(mask.as_bytes());
+            payload.push(0x01);
+            let flags = (*muted as u8) | ((*deafened as u8) << 1);
+            payload.push(flags);
+        }
+
+        // final packet
         let mut list_packet = vec![0x05];
         list_packet.extend_from_slice(&unmasked_count.to_be_bytes());
         list_packet.extend_from_slice(&(masked.len() as u32).to_be_bytes());
@@ -456,6 +474,30 @@ impl ServerState {
                 let unauth_packet = vec![0x07];
                 let _ = self.socket.send_to(&unauth_packet, addr);
                 warn!("{addr} tried sending chat message without having a mask!");
+            }
+        }
+    }
+
+    pub fn handle_ctrl(&mut self, addr: SocketAddr, data: &[u8]) {
+        let Some(remote) = self.remotes.get(&addr) else {
+            warn!(
+                "List request from unknown remote: {}, skipping request...",
+                addr
+            );
+            return;
+        };
+        let mut remote = remote.lock().unwrap();
+
+        match util::parse_control_packet(data) {
+            Ok(req) => match req {
+                ControlRequest::SetDeafen => remote.status.deaf = true,
+                ControlRequest::SetUndeafen => remote.status.deaf = false,
+                ControlRequest::SetMute => remote.status.mute = true,
+                ControlRequest::SetUnmute => remote.status.mute = false,
+                ControlRequest::SetVolume(_) => warn!("{addr} accessed an unimplemented feature"),
+            },
+            Err(e) => {
+                warn!("{addr} sent a bad control packet: {e}");
             }
         }
     }
