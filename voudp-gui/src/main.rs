@@ -124,6 +124,18 @@ impl eframe::App for GuiClientApp {
                             self.nicked = true;
                             self.set_nick();
                         }
+
+                        if ui
+                            .button(
+                                RichText::new("Don't nick")
+                                    .color(Color32::LIGHT_RED),
+                            )
+                            .clicked()
+                        {
+                            self.error.show = ShowMode::DontShow;
+                            self.input = String::new();
+                            self.nick = String::new();
+                        }
                     });
             }
             _ => {}
