@@ -1,9 +1,14 @@
 use std::io;
 use std::io::Write;
+use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
 
-use chacha20poly1305::Key;
+use chacha20poly1305::aead::rand_core::RngCore;
+use chacha20poly1305::aead::{Aead, OsRng};
+use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
+
+pub const VOUDP_SALT: &[u8; 5] = b"voudp";
 
 pub fn ask(prompt: &str) -> String {
     print!("{}", prompt);
@@ -106,4 +111,131 @@ pub fn derive_key_from_phrase(phrase: &[u8], salt: &[u8]) -> Key {
     pbkdf2_hmac::<Sha256>(phrase, salt, iters, &mut key_b);
 
     Key::from_slice(&key_b).to_owned()
+}
+
+pub struct SecureUdpSocket {
+    socket: UdpSocket,
+    connected_addr: Option<SocketAddr>,
+    cipher: ChaCha20Poly1305,
+}
+
+impl Clone for SecureUdpSocket {
+    fn clone(&self) -> Self {
+        let cloned_socket = self.socket.try_clone().expect("failed to clone UdpSocket");
+
+        let cipher = self.cipher.clone();
+
+        Self {
+            socket: cloned_socket,
+            connected_addr: self.connected_addr,
+            cipher,
+        }
+    }
+}
+
+impl SecureUdpSocket {
+    pub fn create(bind_addr: String, key: Key) -> io::Result<SecureUdpSocket> {
+        let socket = UdpSocket::bind(bind_addr)?;
+        socket.set_nonblocking(true)?;
+
+        let cipher = ChaCha20Poly1305::new(&key);
+
+        Ok(Self {
+            socket,
+            connected_addr: None,
+            cipher,
+        })
+    }
+
+    pub fn connect<A: ToSocketAddrs>(&mut self, addr: A) -> io::Result<()> {
+        let addrs = addr.to_socket_addrs()?;
+        if let Some(addr) = addrs.into_iter().find(|a| a.is_ipv4()) {
+            self.connected_addr = Some(addr);
+            Ok(())
+        } else {
+            Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "no valid IPv4 address found",
+            ))
+        }
+    }
+
+    pub fn send(&self, buf: &[u8]) -> io::Result<usize> {
+        match self.connected_addr {
+            Some(addr) => Ok(self.send_to(buf, addr)?),
+            None => Err(io::ErrorKind::NotConnected.into()),
+        }
+    }
+
+    /// layout: [12-byte nonce || ciphertext+tag]
+    pub fn send_to(&self, buf: &[u8], addr: SocketAddr) -> io::Result<usize> {
+        // generate random nonce
+        let mut nonce_bytes = [0u8; 12];
+        OsRng.fill_bytes(&mut nonce_bytes);
+        let nonce = Nonce::from_slice(&nonce_bytes);
+
+        // encrypt
+        let ciphertext = self
+            .cipher
+            .encrypt(nonce, buf)
+            .map_err(|_| io::Error::other("encryption failure"))?;
+
+        // how to build: nonce + ciphertext
+        let mut packet = Vec::with_capacity(12 + ciphertext.len());
+        packet.extend_from_slice(&nonce_bytes);
+        packet.extend_from_slice(&ciphertext);
+
+        self.socket.send_to(&packet, addr)
+    }
+
+    /// layout: [12-byte nonce + ciphertext + tag]
+    pub fn recv_from(
+        &self,
+        buf: &mut [u8],
+    ) -> Result<
+        (usize, SocketAddr),
+        (
+            io::Error,
+            SocketAddr, /* we need to forward the addr even when failing to let the remote know */
+        ),
+    > {
+        let (size, addr) = match self.socket.recv_from(buf) {
+            Ok(ok) => ok,
+            Err(e) => return Err((e, SocketAddr::from(([0, 0, 0, 0], 0)))), // no addr yet
+        };
+
+        if size < 12 {
+            if size == 1 && buf[0] == 0xf {
+                return Err((
+                    io::Error::new(io::ErrorKind::Unsupported, "unencrpyted"),
+                    addr,
+                ));
+            } else {
+                return Err((
+                    io::Error::new(io::ErrorKind::InvalidData, "packet too small"),
+                    addr,
+                ));
+            }
+        }
+
+        let (nonce_bytes, ciphertext) = buf[..size].split_at(12);
+        let nonce = Nonce::from_slice(nonce_bytes);
+
+        let plaintext = match self.cipher.decrypt(nonce, ciphertext) {
+            Ok(pt) => pt,
+            Err(_) => {
+                return Err((io::Error::other("decryption failure"), addr));
+            }
+        };
+
+        // overwrite buffer with plaintext
+        buf[..plaintext.len()].copy_from_slice(&plaintext);
+
+        Ok((plaintext.len(), addr))
+    }
+
+    pub fn send_bad_packet_notice(&self, addr: SocketAddr) -> io::Result<usize> {
+        let notice = vec![0xf];
+        self.socket.send_to(&notice, addr)
+    }
 }

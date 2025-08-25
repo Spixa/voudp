@@ -1,7 +1,6 @@
 use std::{
     fs::File,
     io::Read,
-    net::UdpSocket,
     time::{Duration, Instant},
 };
 
@@ -20,21 +19,23 @@ use symphonia::{
     default::{get_codecs, get_probe},
 };
 
+use crate::util::{self, SecureUdpSocket};
+
 const TARGET_SAMPLE_RATE: u32 = 48_000;
 const FRAME_SIZE: usize = 960; // 20ms at 48kHz
 const FRAME_DURATION: Duration = Duration::from_millis(20);
 const CHANNELS: usize = 2; // Stereo
 
 pub struct MusicClientState {
-    socket: UdpSocket,
+    socket: SecureUdpSocket,
     channel_id: u32,
 }
 
 impl MusicClientState {
-    pub fn new(addr: &str, channel_id: u32) -> Result<Self> {
-        let socket = UdpSocket::bind("0.0.0.0:0")?;
+    pub fn new(addr: &str, channel_id: u32, phrase: &[u8]) -> Result<Self> {
+        let key = util::derive_key_from_phrase(phrase, util::VOUDP_SALT);
+        let mut socket = SecureUdpSocket::create("0.0.0.0:0".into(), key)?;
         socket.connect(addr)?;
-        socket.set_nonblocking(true)?;
 
         Ok(Self { socket, channel_id })
     }
@@ -43,6 +44,7 @@ impl MusicClientState {
         let mut join_packet = vec![0x01];
         join_packet.extend_from_slice(&self.channel_id.to_be_bytes());
         self.socket.send(&join_packet)?;
+
         println!("joined channel {}", self.channel_id);
 
         let mut opus_encoder = Encoder::new(
