@@ -1,3 +1,3 @@
 #!/bin/bash
 
-cargo run --release --bin voudp-cli -- server --port 37549
+cargo run --release --bin voudp-cli -- server --port 37549 --phrase "chicken banana"

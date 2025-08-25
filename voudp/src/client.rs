@@ -4,14 +4,13 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use opus::{Application, Channels, Decoder, Encoder};
 use std::collections::VecDeque;
 use std::io;
-use std::net::UdpSocket;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::util;
+use crate::util::{self, SecureUdpSocket};
 
 const TARGET_FRAME_SIZE: usize = 960; // 20ms at 48kHz
 const BUFFER_CAPACITY: usize = TARGET_FRAME_SIZE * 10; // 10 frames
@@ -21,14 +20,20 @@ pub enum Mode {
     Gui,
 }
 
+pub enum State {
+    Fine,
+    IncorrectPhraseError,
+}
+
 pub struct ClientState {
-    socket: UdpSocket,
+    socket: SecureUdpSocket,
     muted: Arc<AtomicBool>,
     deafened: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
     channel_id: Arc<Mutex<u32>>,
     pub list: SafeChannelList,
     pub rx: Option<Receiver<OwnedMessage>>,
+    pub state: Arc<Mutex<State>>,
 }
 
 type OwnedMessage = (String, String, DateTime<Local>);
@@ -42,10 +47,11 @@ pub struct ChannelList {
 type SafeChannelList = Arc<Mutex<ChannelList>>;
 
 impl ClientState {
-    pub fn new(ip: &str, channel_id: u32) -> Result<Self, io::Error> {
-        let socket = UdpSocket::bind("0.0.0.0:0")?; // let OS decide port
+    pub fn new(ip: &str, channel_id: u32, phrase: &[u8]) -> Result<Self, io::Error> {
+        let key = util::derive_key_from_phrase(phrase, util::VOUDP_SALT);
+        let mut socket = SecureUdpSocket::create("0.0.0.0:0".into(), key)?; // let OS decide port
+
         socket.connect(ip)?;
-        socket.set_nonblocking(true)?;
 
         Ok(Self {
             socket,
@@ -55,6 +61,7 @@ impl ClientState {
             channel_id: Arc::new(Mutex::new(channel_id)),
             list: Default::default(),
             rx: None,
+            state: Arc::new(Mutex::new(State::Fine)),
         })
     }
 
@@ -66,11 +73,12 @@ impl ClientState {
             p
         };
 
-        let socket = self.socket.try_clone()?;
+        let socket = self.socket.clone();
         let muted = self.muted.clone();
         let deafened = self.deafened.clone();
         let connected = self.connected.clone();
         let list = self.list.clone();
+        let state = self.state.clone();
 
         let (tx, rx) = mpsc::channel::<OwnedMessage>();
 
@@ -78,7 +86,7 @@ impl ClientState {
         match mode {
             Mode::Repl => {
                 self.socket.send(&join_packet)?;
-                Self::start_audio(socket, muted, deafened, connected, list, tx, mode)?;
+                Self::start_audio(socket, muted, deafened, connected, state, list, tx, mode)?;
             }
             Mode::Gui => {
                 thread::spawn(move || {
@@ -87,7 +95,7 @@ impl ClientState {
                         return;
                     }
                     if let Err(e) =
-                        Self::start_audio(socket, muted, deafened, connected, list, tx, mode)
+                        Self::start_audio(socket, muted, deafened, connected, state, list, tx, mode)
                     {
                         eprintln!("audio thread error: {e:?}");
                     }
@@ -100,10 +108,11 @@ impl ClientState {
     }
 
     fn start_audio(
-        socket: UdpSocket,
+        socket: SecureUdpSocket,
         muted: Arc<AtomicBool>,
         deafened: Arc<AtomicBool>,
         connected: Arc<AtomicBool>,
+        state: Arc<Mutex<State>>,
         list: SafeChannelList,
         tx: Sender<OwnedMessage>,
         mode: Mode,
@@ -120,13 +129,22 @@ impl ClientState {
 
         // spawn network thread
         {
-            let socket = socket.try_clone()?;
+            let socket = socket.clone();
             let input_clone = Arc::clone(&input_buffer);
             let output_clone = Arc::clone(&output_buffer);
             let connected_clone = Arc::clone(&connected);
+            let state_clone = Arc::clone(&state);
             let list = list.clone();
             thread::spawn(move || {
-                Self::network_thread(socket, input_clone, output_clone, list, tx, connected_clone)
+                Self::network_thread(
+                    socket,
+                    input_clone,
+                    output_clone,
+                    list,
+                    tx,
+                    connected_clone,
+                    state_clone,
+                )
             });
         }
 
@@ -233,12 +251,13 @@ impl ClientState {
     }
 
     fn network_thread(
-        socket: UdpSocket,
+        socket: SecureUdpSocket,
         input: Arc<Mutex<VecDeque<f32>>>,
         output: Arc<Mutex<VecDeque<f32>>>,
         list: SafeChannelList,
         tx: Sender<OwnedMessage>,
         connected: Arc<AtomicBool>,
+        state: Arc<Mutex<State>>,
     ) {
         let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
         let mut decoder = Decoder::new(48000, Channels::Stereo).unwrap();
@@ -323,8 +342,16 @@ impl ClientState {
                     }
                 }
                 Ok((_, _)) => {}
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                Err(e) if e.0.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(1));
+                }
+                Err(e) if e.0.kind() == io::ErrorKind::Unsupported => {
+                    connected.store(false, Ordering::Relaxed);
+                    {
+                        let mut state = state.lock().unwrap();
+                        *state = State::IncorrectPhraseError;
+                    }
+                    break;
                 }
                 Err(_) => break,
             }
@@ -333,7 +360,7 @@ impl ClientState {
     }
 
     fn repl(
-        socket: UdpSocket,
+        socket: SecureUdpSocket,
         muted: Arc<AtomicBool>,
         deafened: Arc<AtomicBool>,
         list: SafeChannelList,

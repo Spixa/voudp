@@ -7,14 +7,14 @@ use ringbuf::{
 use std::{
     collections::{HashMap, VecDeque},
     io,
-    net::{SocketAddr, UdpSocket},
+    net::SocketAddr,
     sync::{Arc, Mutex},
     time::{Duration, Instant},
 };
 
 use crate::{
     mixer,
-    util::{self, ControlRequest},
+    util::{self, ControlRequest, SecureUdpSocket},
 };
 const JITTER_BUFFER_LEN: usize = 50;
 
@@ -140,7 +140,7 @@ impl Channel {
         self.filter_states.remove(addr);
     }
 
-    fn mix(&mut self, socket: &UdpSocket) {
+    fn mix(&mut self, socket: &SecureUdpSocket) {
         // pre-proc audio for every remote:
         let mut processed_buffers = HashMap::new();
         for (addr, buf) in &self.buffers {
@@ -223,7 +223,7 @@ impl Channel {
 }
 
 pub struct ServerState {
-    socket: Arc<UdpSocket>,
+    socket: Arc<SecureUdpSocket>,
     remotes: HashMap<SocketAddr, SafeRemote>,
     channels: HashMap<u32, Channel>,
     audio_rb: HeapRb<(SocketAddr, Vec<u8>)>,
@@ -231,9 +231,11 @@ pub struct ServerState {
 }
 
 impl ServerState {
-    pub fn new(config: ServerConfig) -> Result<Self, io::Error> {
-        let socket = UdpSocket::bind(format!("0.0.0.0:{}", config.bind_port))?;
-        socket.set_nonblocking(true)?;
+    pub fn new(config: ServerConfig, phrase: &[u8]) -> Result<Self, io::Error> {
+        info!("Deriving key from phrase...");
+        let key = util::derive_key_from_phrase(phrase, util::VOUDP_SALT);
+        let socket = SecureUdpSocket::create(format!("0.0.0.0:{}", config.bind_port), key)?;
+
         info!("Bound to 0.0.0.0:{}", config.bind_port);
         let socket = Arc::new(socket); // wrap in Arc
         info!(
@@ -502,6 +504,11 @@ impl ServerState {
         }
     }
 
+    pub fn handle_bad(&mut self, addr: SocketAddr) {
+        warn!("{addr} sent a bad packet");
+        let _ = self.socket.send_bad_packet_notice(addr);
+    }
+
     fn process_audio_tick(&mut self) {
         let framesize = self.config.get_framesize();
         // decode incoming packets and fill jitter buffers
@@ -614,8 +621,17 @@ impl ServerState {
         }
 
         loop {
-            while let Ok((size, addr)) = self.socket.recv_from(&mut buf) {
-                self.handle_packet(addr, &buf[..size]);
+            loop {
+                match self.socket.recv_from(&mut buf) {
+                    Ok((size, addr)) => {
+                        self.handle_packet(addr, &buf[..size]);
+                    }
+                    Err(ref e) if e.0.kind() == std::io::ErrorKind::WouldBlock => break,
+                    Err(e) => {
+                        self.handle_bad(e.1);
+                        break;
+                    }
+                }
             }
 
             if Instant::now() >= next_tick {

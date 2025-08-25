@@ -36,6 +36,7 @@ type LogVec = Arc<RwLock<Vec<(String, egui::Color32, DateTime<Local>)>>>;
 struct GuiClientApp {
     address: String,
     chan_id_text: String,
+    phrase: String,
     is_connected: bool,
     muted: bool,
     deafened: bool,
@@ -70,6 +71,7 @@ impl Default for GuiClientApp {
         Self {
             address: "127.0.0.1:37549".to_string(),
             chan_id_text: "1".to_string(),
+            phrase: "".to_string(),
             is_connected: false,
             muted: false,
             deafened: false,
@@ -153,7 +155,15 @@ impl eframe::App for GuiClientApp {
                             egui::TextEdit::singleline(&mut self.address)
                                 .hint_text("server address (ip:port)"),
                         );
-                        ui.label("🔌 Channel ID:");
+
+                        ui.label("🔑 Server password:");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.phrase)
+                                .hint_text("usually \'chicken banana\'")
+                                .password(true),
+                        );
+
+                        ui.label("🔗 Channel ID:");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.chan_id_text)
                                 .hint_text("ID")
@@ -173,7 +183,11 @@ impl eframe::App for GuiClientApp {
                                 }
                             };
 
-                            match ClientState::new(&self.address, chan_id) {
+                            match ClientState::new(
+                                &self.address,
+                                chan_id,
+                                &self.phrase.clone().into_bytes(),
+                            ) {
                                 Ok(state) => {
                                     info!("Connected to server at {}", self.address);
 
@@ -201,7 +215,9 @@ impl eframe::App for GuiClientApp {
                                     self.is_connected = true;
                                 }
                                 Err(e) => {
-                                    eprintln!("Failed to connect: {:?}", e);
+                                    self.error.show = ShowMode::ShowError;
+                                    self.error.message =
+                                        format!("Failed to connect to the server: {}", e);
                                 }
                             }
                         }
@@ -393,10 +409,30 @@ impl eframe::App for GuiClientApp {
             };
             let client = client.lock().unwrap();
             let list = client.list.lock().unwrap();
+            let state = client.state.lock().unwrap();
+
+            match *state {
+                client::State::Fine => {}
+                client::State::IncorrectPhraseError => {
+                    self.error.show = ShowMode::ShowError;
+                    self.error.message =
+                        "You are likely communicating to the server with the wrong passphrase"
+                            .to_string();
+
+                    self.is_connected = false;
+                    self.client = None;
+                    if let Some(handle) = self.client_thread.take() {
+                        handle.join().ok();
+                    }
+                    return;
+                }
+            }
+
             self.unmasked_count = list.unmasked;
             self.masked_users = list.masked.clone();
         }
 
+        // TODO: merge this with the upper block
         // === Update chat logs ===
         {
             let Some(client) = self.client.clone() else {

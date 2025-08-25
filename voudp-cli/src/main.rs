@@ -71,6 +71,9 @@ enum Mode {
         /// Tickrate (ticks per second)
         #[clap(long, default_value_t = 50)]
         tickrate: u32,
+
+        #[clap(long)]
+        phrase: String,
     },
 
     /// Start a client that captures and streams microphone audio
@@ -82,6 +85,9 @@ enum Mode {
         /// ID of the channel to connect to
         #[clap(long, default_value_t = 1)]
         channel_id: u32,
+
+        #[clap(long)]
+        phrase: String,
     },
 
     /// Start a client that streams audio from a file
@@ -97,6 +103,9 @@ enum Mode {
         /// Path to file to stream
         #[clap(long)]
         file: String,
+
+        #[clap(long)]
+        phrase: String,
     },
 }
 
@@ -107,8 +116,9 @@ fn main() -> Result<()> {
         Mode::Client {
             connect,
             channel_id,
+            phrase,
         } => {
-            let mut client = ClientState::new(&connect, channel_id)?;
+            let mut client = ClientState::new(&connect, channel_id, &phrase.into_bytes())?;
             client.run(client::Mode::Repl)?;
         }
 
@@ -116,8 +126,9 @@ fn main() -> Result<()> {
             connect,
             channel_id,
             file,
+            phrase,
         } => {
-            let mut client = MusicClientState::new(&connect, channel_id)?;
+            let mut client = MusicClientState::new(&connect, channel_id, &phrase.into_bytes())?;
             client.run(file)?;
         }
 
@@ -133,6 +144,7 @@ fn main() -> Result<()> {
             throttle_millis,
             sample_rate,
             tickrate,
+            phrase,
         } => {
             let config = ServerConfig {
                 bind_port: port,
@@ -152,7 +164,7 @@ fn main() -> Result<()> {
                 tickrate,
             };
             init_logger();
-            let mut server = ServerState::new(config)?;
+            let mut server = ServerState::new(config, &phrase.into_bytes())?;
             server.run();
         }
     }
