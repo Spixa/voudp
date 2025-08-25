@@ -126,10 +126,7 @@ impl eframe::App for GuiClientApp {
                         }
 
                         if ui
-                            .button(
-                                RichText::new("Don't nick")
-                                    .color(Color32::LIGHT_RED),
-                            )
+                            .button(RichText::new("Don't nick").color(Color32::LIGHT_RED))
                             .clicked()
                         {
                             self.error.show = ShowMode::DontShow;

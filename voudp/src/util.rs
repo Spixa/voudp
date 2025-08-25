@@ -1,6 +1,10 @@
 use std::io;
 use std::io::Write;
 
+use chacha20poly1305::Key;
+use pbkdf2::pbkdf2_hmac;
+use sha2::Sha256;
+
 pub fn ask(prompt: &str) -> String {
     print!("{}", prompt);
     std::io::stdout().flush().unwrap();
@@ -94,4 +98,12 @@ pub fn parse_control_packet(data: &[u8]) -> Result<ControlRequest, String> {
     };
 
     Ok(req)
+}
+
+pub fn derive_key_from_phrase(phrase: &[u8], salt: &[u8]) -> Key {
+    let iters = 600_000u32;
+    let mut key_b = [0u8; 32];
+    pbkdf2_hmac::<Sha256>(phrase, salt, iters, &mut key_b);
+
+    Key::from_slice(&key_b).to_owned()
 }
