@@ -125,6 +125,7 @@ impl eframe::App for GuiClientApp {
                             self.error.show = ShowMode::DontShow;
                             self.nicked = true;
                             self.set_nick();
+                            self.send_message();
                         }
 
                         if ui
@@ -159,7 +160,7 @@ impl eframe::App for GuiClientApp {
                         ui.label("🔑 Server password:");
                         ui.add(
                             egui::TextEdit::singleline(&mut self.phrase)
-                                .hint_text("usually \'chicken banana\'")
+                                .hint_text("usually \'voudp\'")
                                 .password(true),
                         );
 
@@ -481,6 +482,7 @@ impl GuiClientApp {
         };
 
         client.send(&msg);
+
         self.input.clear();
     }
 
@@ -494,6 +496,5 @@ impl GuiClientApp {
         };
 
         client.send(&nick);
-        self.input.clear();
     }
 }
