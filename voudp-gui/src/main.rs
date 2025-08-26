@@ -8,7 +8,7 @@ use std::{
     sync::{Arc, Mutex, RwLock, mpsc::TryRecvError},
     thread::{self, JoinHandle},
 };
-use voudp::client::{self, ClientState};
+use voudp::client::{self, ClientState, Message};
 
 fn main() -> Result<()> {
     // Initialize logging
@@ -446,13 +446,36 @@ impl eframe::App for GuiClientApp {
                 return;
             };
             match rx.try_recv() {
-                Ok((name, msg, time)) => {
-                    self.logs.write().unwrap().push((
-                        format!("{name}: {msg}"),
-                        Color32::WHITE,
-                        time,
-                    ));
-                }
+                Ok((msg, time)) => match msg {
+                    Message::JoinMessage(name) => {
+                        self.logs.write().unwrap().push((
+                            format!("{name} joined the channel"),
+                            Color32::YELLOW,
+                            time,
+                        ));
+                    }
+                    Message::LeaveMessage(name) => {
+                        self.logs.write().unwrap().push((
+                            format!("{name} left the channel"),
+                            Color32::YELLOW,
+                            time,
+                        ));
+                    }
+                    Message::ChatMessage(name, content) => {
+                        self.logs.write().unwrap().push((
+                            format!("{name}: {content}"),
+                            Color32::WHITE,
+                            time,
+                        ));
+                    }
+                    Message::Broadcast(alias, content) => {
+                        self.logs.write().unwrap().push((
+                            format!("[{alias}] {content}"),
+                            Color32::LIGHT_GREEN,
+                            time,
+                        ));
+                    }
+                },
                 Err(TryRecvError::Empty) => thread::yield_now(),
                 Err(TryRecvError::Disconnected) => {}
             }
@@ -468,6 +491,10 @@ impl GuiClientApp {
     }
 
     fn send_message(&mut self) {
+        if self.input.is_empty() {
+            return;
+        }
+
         if !self.nicked {
             self.error.show = ShowMode::ShowMaskScreen;
             return;

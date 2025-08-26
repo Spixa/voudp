@@ -36,7 +36,14 @@ pub struct ClientState {
     pub state: Arc<Mutex<State>>,
 }
 
-type OwnedMessage = (String, String, DateTime<Local>);
+type OwnedMessage = (Message, DateTime<Local>);
+
+pub enum Message {
+    JoinMessage(String),
+    LeaveMessage(String),
+    ChatMessage(String, String),
+    Broadcast(String, String),
+}
 
 #[derive(Default)]
 pub struct ChannelList {
@@ -334,11 +341,16 @@ impl ClientState {
                 Ok((size, _)) if size > 1 && recv_buf[0] == 0x06 => {
                     match util::parse_msg_packet(&recv_buf[..size]) {
                         Ok((username, text)) => {
-                            let _ = tx.send((username, text, Local::now()));
+                            let _ = tx.send((Message::ChatMessage(username, text), Local::now()));
                         }
                         Err(e) => {
                             eprintln!("error: {e}");
                         }
+                    }
+                }
+                Ok((size, _)) if size > 1 && (recv_buf[0] == 0x0a || recv_buf[0] == 0x0b) => {
+                    if let Some(msg) = util::parse_flow_packet(&recv_buf[..size]) {
+                        let _ = tx.send((msg, Local::now()));
                     }
                 }
                 Ok((_, _)) => {}

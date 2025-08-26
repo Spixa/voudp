@@ -8,6 +8,8 @@ use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
 
+use crate::client::Message;
+
 pub const VOUDP_SALT: &[u8; 5] = b"voudp";
 
 pub fn ask(prompt: &str) -> String {
@@ -84,6 +86,23 @@ pub fn parse_msg_packet(data: &[u8]) -> Result<(String, String), String> {
     Ok((username, message))
 }
 
+pub fn parse_flow_packet(data: &[u8]) -> Option<Message> {
+    match data.first() {
+        Some(byte) => {
+            let uname = &data[1..];
+            let Ok(uname) = String::from_utf8(uname.to_vec()) else {
+                return None;
+            };
+
+            match byte {
+                0x0a => Some(Message::JoinMessage(uname)),
+                0x0b => Some(Message::LeaveMessage(uname)),
+                _ => None,
+            }
+        }
+        None => None,
+    }
+}
 pub enum ControlRequest {
     SetDeafen,
     SetUndeafen,

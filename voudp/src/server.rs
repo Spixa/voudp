@@ -327,8 +327,24 @@ impl ServerState {
         self.remotes.retain(|addr_got, remote| {
             if *addr_got == addr {
                 let channel_id = { remote.lock().unwrap().channel_id };
+                let nick = { remote.lock().unwrap().mask.clone() };
                 if let Some(channel) = self.channels.get_mut(&channel_id) {
                     info!("{addr} has left");
+
+                    if let Some(nick) = nick {
+                        info!("Broadcasting leave of {nick}");
+                        let mut packet = vec![0x0b];
+                        packet.extend_from_slice(nick.as_bytes());
+
+                        for peer in &channel.remotes {
+                            let peer_addr = { peer.lock().unwrap().addr };
+
+                            if let Err(e) = self.socket.send_to(&packet, peer_addr) {
+                                warn!("Failed to send leave packet to {}: {:?}", peer_addr, e);
+                            }
+                        }
+                    }
+
                     channel.remove_remote(&addr);
                 } // if this is false, the remote is channel-less which i don't know how that would even happen
                 return false;
@@ -337,34 +353,59 @@ impl ServerState {
         });
     }
 
+    // TODO: announce old mask in join message incase of renicking
     fn handle_mask(&mut self, addr: SocketAddr, data: &[u8]) {
-        let Some(remote) = self.remotes.get(&addr) else {
-            warn!("Mask from unknown remote: {}, skipping request...", addr);
-            return;
+        let (new_mask, _old_mask, channel_id) = {
+            let Some(remote) = self.remotes.get(&addr) else {
+                warn!("Mask from unknown remote: {}, skipping request...", addr);
+                return;
+            };
+
+            let (channel_id, mask) = {
+                let remote = remote.lock().unwrap();
+                (remote.channel_id, remote.mask.clone())
+            };
+            let Ok(new_mask) = String::from_utf8(data.to_vec()) else {
+                warn!("Mask sent over is not UTF-8, skipping request...");
+                return;
+            };
+
+            let old_mask = match mask {
+                Some(old_mask) => {
+                    info!(
+                        "\"{}\" has changed their mask to \"{}\" ({})",
+                        old_mask, new_mask, addr
+                    );
+                    Some(old_mask)
+                }
+                None => {
+                    info!(
+                        "\"{}\" has masked for the first time to \"{}\"",
+                        addr, new_mask
+                    );
+                    None
+                }
+            };
+
+            let mut remote = remote.lock().unwrap();
+            remote.mask(&new_mask);
+
+            (new_mask, old_mask, channel_id)
         };
 
-        let mut remote = remote.lock().unwrap();
-        let Ok(new_mask) = String::from_utf8(data.to_vec()) else {
-            warn!("Mask sent over is not UTF-8, skipping request...");
-            return;
-        };
+        let mut packet = vec![0x0a];
+        packet.extend_from_slice(new_mask.as_bytes());
 
-        match &remote.mask {
-            Some(old_mask) => {
-                info!(
-                    "\"{}\" has changed their mask to \"{}\" ({})",
-                    old_mask, new_mask, addr
-                );
-            }
-            None => {
-                info!(
-                    "\"{}\" has masked for the first time to \"{}\"",
-                    addr, new_mask
-                );
+        // Broadcast to all remotes in the channel
+        if let Some(channel) = self.channels.get_mut(&channel_id) {
+            for peer in &channel.remotes {
+                let peer_addr = { peer.lock().unwrap().addr };
+
+                if let Err(e) = self.socket.send_to(&packet, peer_addr) {
+                    warn!("Failed to send leave packet to {}: {:?}", peer_addr, e);
+                }
             }
         }
-
-        remote.mask(&new_mask);
     }
 
     fn handle_list(&mut self, addr: SocketAddr) {
@@ -557,7 +598,7 @@ impl ServerState {
 
         self.remotes.retain(|addr, remote| {
             let last_active = { remote.lock().unwrap().last_active };
-
+            let nick = { remote.lock().unwrap().mask.clone() };
             let channel_id = { remote.lock().unwrap().channel_id };
 
             if now.duration_since(last_active) > Duration::from_secs(self.config.timeout_secs) {
@@ -566,6 +607,20 @@ impl ServerState {
                         "{addr} is dropped due to timeout of {} seconds",
                         self.config.timeout_secs
                     );
+
+                    if let Some(nick) = nick {
+                        info!("Broadcasting leave of {nick}");
+                        let mut packet = vec![0x0b];
+                        packet.extend_from_slice(nick.as_bytes());
+
+                        for peer in &channel.remotes {
+                            let peer_addr = { peer.lock().unwrap().addr };
+
+                            if let Err(e) = self.socket.send_to(&packet, peer_addr) {
+                                warn!("Failed to send leave packet to {}: {:?}", peer_addr, e);
+                            }
+                        }
+                    }
                     channel.remove_remote(addr);
                 } // if this is false, the remote is channel-less which i don't know how that would even happen
                 false // remote hasn't updated in the past N seconds, needs to be kicked
