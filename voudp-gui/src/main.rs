@@ -194,14 +194,15 @@ impl eframe::App for GuiClientApp {
 
                                     self.write_log(
                                         format!(
-                                            "Connected to {} in channel {}",
+                                            "Connected to {} in channel #{}",
                                             self.address, chan_id
                                         ),
-                                        Color32::YELLOW,
+                                        Color32::KHAKI,
                                     );
+
                                     self.write_log(
-                                        "Hope you enjoy your stay".into(),
-                                        Color32::GREEN,
+                                        "You need to mask to appear for others".into(),
+                                        Color32::DARK_GREEN,
                                     );
 
                                     let arc_state = Arc::new(Mutex::new(state));
