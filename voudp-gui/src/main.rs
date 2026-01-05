@@ -357,10 +357,10 @@ impl eframe::App for GuiClientApp {
                                         }
 
                                         if !is_current_channel {
-                                        ui.button("Join").clicked().then(|| {
-                                            self.join_channel(channel.channel_id);
-                                        });
-                                    }
+                                            ui.button("Join").clicked().then(|| {
+                                                self.join_channel(channel.channel_id);
+                                            });
+                                        }
                                     });
 
                                     if is_current_channel {
@@ -387,7 +387,7 @@ impl eframe::App for GuiClientApp {
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new("🕐").small());
                                     ui.label(
-                                        RichText::new(format!("Updating every second"))
+                                        RichText::new("Updating every second".to_string())
                                             .color(Color32::GRAY)
                                             .small(),
                                     );
@@ -633,13 +633,13 @@ impl GuiClientApp {
     }
 
     fn join_channel(&self, id: u32) {
-        if let Some(client) = &self.client {
-            if let Err(e) = client.lock().unwrap().join(id) {
-                eprintln!(
-                    "we faced an error when trying to join channel {}: {}",
-                    id, e
-                );
-            }
+        if let Some(client) = &self.client
+            && let Err(e) = client.lock().unwrap().join(id)
+        {
+            eprintln!(
+                "we faced an error when trying to join channel {}: {}",
+                id, e
+            );
         }
     }
 

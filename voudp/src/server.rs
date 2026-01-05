@@ -289,10 +289,11 @@ impl ServerState {
             old_id
         };
 
-        if old_channel_id != chan_id && old_channel_id != 0 {
-            if let Some(old_channel) = self.channels.get_mut(&old_channel_id) {
-                old_channel.remove_remote(&addr);
-            }
+        if old_channel_id != chan_id
+            && old_channel_id != 0
+            && let Some(old_channel) = self.channels.get_mut(&old_channel_id)
+        {
+            old_channel.remove_remote(&addr);
         }
 
         // add to new channel
