@@ -7,8 +7,9 @@ use log::info;
 use std::{
     sync::{Arc, Mutex, RwLock, mpsc::TryRecvError},
     thread::{self, JoinHandle},
+    time::Instant,
 };
-use voudp::client::{self, ClientState, Message};
+use voudp::client::{self, ClientState, GlobalListState, Message};
 
 fn main() -> Result<()> {
     // Initialize logging
@@ -34,6 +35,8 @@ fn main() -> Result<()> {
 type LogVec = Arc<RwLock<Vec<(String, egui::Color32, DateTime<Local>)>>>;
 
 struct GuiClientApp {
+    global_list: GlobalListState,
+    current_channel_id: u32,
     address: String,
     chan_id_text: String,
     phrase: String,
@@ -48,8 +51,6 @@ struct GuiClientApp {
     nick: String,
     nicked: bool,
     logs: LogVec,
-    unmasked_count: u32,
-    masked_users: Vec<(String, bool, bool)>,
 }
 
 #[derive(Default)]
@@ -70,6 +71,12 @@ impl Default for GuiClientApp {
     fn default() -> Self {
         Self {
             address: "127.0.0.1:37549".to_string(),
+            current_channel_id: 0,
+            global_list: GlobalListState {
+                channels: vec![],
+                last_updated: Instant::now(),
+                current_channel: 0,
+            },
             chan_id_text: "1".to_string(),
             phrase: "".to_string(),
             is_connected: false,
@@ -81,8 +88,6 @@ impl Default for GuiClientApp {
             client_thread: None,
             error: Default::default(),
             logs: Default::default(),
-            unmasked_count: 0,
-            masked_users: Vec::new(),
             input: Default::default(),
             nick: Default::default(),
         }
@@ -227,42 +232,168 @@ impl eframe::App for GuiClientApp {
                 });
             });
         } else {
-            // Connected UI
-            egui::SidePanel::right("user_list_panel")
+            self.update_global_list();
+            egui::SidePanel::right("global_list_panel")
                 .resizable(true)
-                .default_width(180.0)
+                .default_width(250.0)
+                .min_width(200.0)
+                .max_width(400.0)
                 .show(ctx, |ui| {
-                    ui.heading("📜 Users");
-                    ui.label(format!("Unmasked: {}", self.unmasked_count));
-                    ui.label(format!("Masked: {}", self.masked_users.len()));
+                    ui.heading("🌐 Server List");
+
+                    // Server summary at the top
+                    let total_users = self
+                        .global_list
+                        .channels
+                        .iter()
+                        .map(|c| c.unmasked_count as usize + c.masked_users.len())
+                        .sum::<usize>();
+                    let total_channels = self.global_list.channels.len();
+
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("📊").size(18.0));
+                        ui.label(format!("{} users", total_users));
+                        ui.label("•");
+                        ui.label(format!("{} channels", total_channels));
+                    });
+
                     ui.separator();
-                    egui::ScrollArea::vertical().show(ui, |ui| {
-                        if self.masked_users.is_empty() {
-                            ui.label("No masked users connected.");
-                        } else {
-                            for (name, muted, deafened) in &self.masked_users {
-                                ui.horizontal(|ui| {
-                                    // Connection dot
+
+                    egui::ScrollArea::vertical()
+                        .auto_shrink(false)
+                        .show(ui, |ui| {
+                            if self.global_list.channels.is_empty() {
+                                ui.vertical_centered(|ui| {
+                                    ui.add_space(20.0);
                                     ui.label(
-                                        RichText::new("●")
-                                            .color(Color32::from_rgb(0, 200, 0))
-                                            .monospace(),
+                                        RichText::new("No active channels")
+                                            .color(Color32::GRAY)
+                                            .italics(),
                                     );
+                                    ui.add_space(20.0);
+                                });
+                            } else {
+                                for channel in &self.global_list.channels {
+                                    let is_current_channel =
+                                        channel.channel_id == self.current_channel_id;
 
-                                    // Name
-                                    ui.label(RichText::new(name).strong());
+                                    let header = if is_current_channel {
+                                        RichText::new(format!("📢 Channel #{}", channel.channel_id))
+                                            .color(Color32::LIGHT_GREEN)
+                                            .strong()
+                                    } else {
+                                        RichText::new(format!("🔈 Channel #{}", channel.channel_id))
+                                            .color(Color32::LIGHT_BLUE)
+                                    };
 
-                                    // Status icons / text
-                                    if *muted {
-                                        ui.label(RichText::new("🔇").size(14.0)); // muted icon
+                                    let total_in_channel = channel.unmasked_count as usize
+                                        + channel.masked_users.len();
+
+                                    let response = ui.collapsing(header, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(RichText::new("👤").small());
+                                            ui.label(format!("{} users", total_in_channel));
+                                            if channel.unmasked_count > 0 {
+                                                ui.label(RichText::new("•").color(Color32::GRAY));
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{} unmasked",
+                                                        channel.unmasked_count
+                                                    ))
+                                                    .color(Color32::YELLOW),
+                                                );
+                                            }
+                                        });
+
+                                        ui.separator();
+
+                                        if channel.masked_users.is_empty() {
+                                            ui.label(
+                                                RichText::new("No masked users")
+                                                    .color(Color32::GRAY)
+                                                    .small(),
+                                            );
+                                        } else {
+                                            for (name, muted, deafened) in &channel.masked_users {
+                                                ui.horizontal(|ui| {
+                                                    // Status indicator
+                                                    let status_color = match (*muted, *deafened) {
+                                                        (true, true) => Color32::RED,
+                                                        (true, false) => Color32::BLUE,
+                                                        (false, true) => Color32::YELLOW,
+                                                        (false, false) => Color32::GREEN,
+                                                    };
+                                                    ui.label(
+                                                        RichText::new("•").color(status_color),
+                                                    );
+
+                                                    // Name
+                                                    ui.label(RichText::new(name));
+
+                                                    // Status icons
+                                                    if *muted {
+                                                        ui.label(RichText::new("🔇").small());
+                                                    }
+                                                    if *deafened {
+                                                        ui.label(RichText::new("🙉").small());
+                                                    }
+                                                });
+                                            }
+                                        }
+
+                                        // Unmasked users count
+                                        if channel.unmasked_count > 0 {
+                                            ui.separator();
+                                            ui.horizontal(|ui| {
+                                                ui.label(RichText::new("👻").small());
+                                                ui.label(
+                                                    RichText::new(format!(
+                                                        "{} unmasked users",
+                                                        channel.unmasked_count
+                                                    ))
+                                                    .color(Color32::GRAY),
+                                                );
+                                            });
+                                        }
+
+                                        if !is_current_channel {
+                                        ui.button("Join").clicked().then(|| {
+                                            self.join_channel(channel.channel_id);
+                                        });
                                     }
-                                    if *deafened {
-                                        ui.label(RichText::new("🙉").size(14.0)); // deafened icon
+                                    });
+
+                                    if is_current_channel {
+                                        ui.painter().rect_stroke(
+                                            response.header_response.rect.expand(2.0),
+                                            4.0,
+                                            egui::Stroke::new(1.0, Color32::LIGHT_GREEN),
+                                        );
                                     }
+                                }
+                            }
+
+                            ui.add_space(10.0);
+
+                            // Refresh button
+                            if ui.button("🔄 Refresh List").clicked() {
+                                self.request_global_list();
+                            }
+
+                            // Last updated time
+                            if !self.global_list.channels.is_empty() {
+                                ui.add_space(5.0);
+                                ui.separator();
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("🕐").small());
+                                    ui.label(
+                                        RichText::new(format!("Updating every second"))
+                                            .color(Color32::GRAY)
+                                            .small(),
+                                    );
                                 });
                             }
-                        }
-                    });
+                        });
                 });
 
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -403,37 +534,6 @@ impl eframe::App for GuiClientApp {
             });
         }
 
-        // === Update user list ===
-        {
-            let Some(client) = self.client.clone() else {
-                ctx.request_repaint_after(std::time::Duration::from_millis(16));
-                return;
-            };
-            let client = client.lock().unwrap();
-            let list = client.list.lock().unwrap();
-            let state = client.state.lock().unwrap();
-
-            match *state {
-                client::State::Fine => {}
-                client::State::IncorrectPhraseError => {
-                    self.error.show = ShowMode::ShowError;
-                    self.error.message =
-                        "You are likely communicating to the server with the wrong passphrase"
-                            .to_string();
-
-                    self.is_connected = false;
-                    self.client = None;
-                    if let Some(handle) = self.client_thread.take() {
-                        handle.join().ok();
-                    }
-                    return;
-                }
-            }
-
-            self.unmasked_count = list.unmasked;
-            self.masked_users = list.masked.clone();
-        }
-
         // TODO: merge this with the upper block
         // === Update chat logs ===
         {
@@ -463,8 +563,9 @@ impl eframe::App for GuiClientApp {
                         ));
                     }
                     Message::ChatMessage(name, content) => {
+                        let channel = self.current_channel_id;
                         self.logs.write().unwrap().push((
-                            format!("{name}: {content}"),
+                            format!("[#{channel}] {name}: {content}"),
                             Color32::WHITE,
                             time,
                         ));
@@ -522,6 +623,36 @@ impl GuiClientApp {
 
     fn write_log(&mut self, log: String, color: Color32) {
         self.logs.write().unwrap().push((log, color, Local::now()));
+    }
+
+    fn request_global_list(&self) {
+        if let Some(client) = &self.client {
+            let packet = vec![0x05]; // Request global list
+            client.lock().unwrap().send(&packet);
+        }
+    }
+
+    fn join_channel(&self, id: u32) {
+        if let Some(client) = &self.client {
+            if let Err(e) = client.lock().unwrap().join(id) {
+                eprintln!(
+                    "we faced an error when trying to join channel {}: {}",
+                    id, e
+                );
+            }
+        }
+    }
+
+    fn update_global_list(&mut self) {
+        if let Some(client) = &self.client {
+            let client = client.lock().unwrap();
+            let list_state = client.list.lock().unwrap();
+
+            self.global_list.channels = list_state.channels.clone();
+            self.global_list.last_updated = Instant::now();
+            self.global_list.current_channel = list_state.current_channel;
+            self.current_channel_id = list_state.current_channel;
+        }
     }
 
     fn send_message(&mut self) {

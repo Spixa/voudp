@@ -18,7 +18,12 @@ pub const VOUDP_SALT: &[u8; 5] = b"voudp";
 const RELIABLE_FLAG: u8 = 0x80;
 const ACK_FLAG: u8 = 0x81;
 
-type List = (u32, u32, Vec<(String, bool, bool)>);
+#[derive(Debug, Clone)]
+pub struct ChannelInfo {
+    pub channel_id: u32,
+    pub unmasked_count: u32,
+    pub masked_users: Vec<(String, bool, bool)>,
+}
 
 pub fn ask(prompt: &str) -> String {
     print!("{}", prompt);
@@ -31,38 +36,88 @@ pub fn ask(prompt: &str) -> String {
     answer.trim().into()
 }
 
-pub fn parse_list_packet(bytes: &[u8]) -> Option<List> {
-    if bytes.len() < 9 || bytes[0] != 0x05 {
+pub fn parse_global_list(bytes: &[u8]) -> Option<(Vec<ChannelInfo>, u32)> {
+    if bytes.len() < 4 {
         return None;
     }
 
-    let unmasked_count = u32::from_be_bytes(bytes[1..5].try_into().ok()?);
-    let masked_count = u32::from_be_bytes(bytes[5..9].try_into().ok()?);
+    let current = u32::from_be_bytes(bytes[0..4].try_into().ok()?);
+    let chan_count = u32::from_be_bytes(bytes[4..8].try_into().ok()?);
+    let mut channels = Vec::new();
+    let mut i = 8;
 
-    let mut masks = Vec::new();
-    let mut i = 9;
-
-    for _ in 0..masked_count {
-        // Find string terminator
-        let sep_pos = bytes[i..].iter().position(|&b| b == 0x01)?;
-        let mask_str = String::from_utf8(bytes[i..i + sep_pos].to_vec()).ok()?;
-        i += sep_pos + 1; // move past mask + separator
-
-        // Read flags
-        if i >= bytes.len() {
+    for _ in 0..chan_count {
+        if i + 12 > bytes.len() {
             return None;
         }
-        let flags = bytes[i];
-        i += 1;
 
-        let muted = flags & 0b00000001 != 0;
-        let deafened = flags & 0b00000010 != 0;
+        let channel_id = u32::from_be_bytes(bytes[i..i + 4].try_into().ok()?);
+        let unmasked_count = u32::from_be_bytes(bytes[i + 4..i + 8].try_into().ok()?);
+        let masked_count = u32::from_be_bytes(bytes[i + 8..i + 12].try_into().ok()?);
 
-        masks.push((mask_str, muted, deafened));
+        i += 12;
+        let mut masked_users = Vec::new();
+
+        for _ in 0..masked_count {
+            let sep_pos = bytes[i..].iter().position(|&b| b == 0x01)?;
+            let mask_str = String::from_utf8(bytes[i..i + sep_pos].to_vec()).ok()?;
+            i += sep_pos + 1;
+
+            if i >= bytes.len() {
+                return None;
+            }
+
+            let flags = bytes[i];
+            i += 1;
+
+            let muted = flags & 0b00000001 != 0;
+            let deafened = flags & 0b00000010 != 0;
+
+            masked_users.push((mask_str, muted, deafened));
+        }
+
+        channels.push(ChannelInfo {
+            channel_id,
+            unmasked_count,
+            masked_users,
+        });
     }
 
-    Some((unmasked_count, masked_count, masks))
+    Some((channels, current))
 }
+
+// pub fn parse_list_packet(bytes: &[u8]) -> Option<List> {
+//     if bytes.len() < 9 || bytes[0] != 0x05 {
+//         return None;
+//     }
+
+//     let unmasked_count = u32::from_be_bytes(bytes[1..5].try_into().ok()?);
+//     let masked_count = u32::from_be_bytes(bytes[5..9].try_into().ok()?);
+
+//     let mut masks = Vec::new();
+//     let mut i = 9;
+
+//     for _ in 0..masked_count {
+//         // Find string terminator
+//         let sep_pos = bytes[i..].iter().position(|&b| b == 0x01)?;
+//         let mask_str = String::from_utf8(bytes[i..i + sep_pos].to_vec()).ok()?;
+//         i += sep_pos + 1; // move past mask + separator
+
+//         // Read flags
+//         if i >= bytes.len() {
+//             return None;
+//         }
+//         let flags = bytes[i];
+//         i += 1;
+
+//         let muted = flags & 0b00000001 != 0;
+//         let deafened = flags & 0b00000010 != 0;
+
+//         masks.push((mask_str, muted, deafened));
+//     }
+
+//     Some((unmasked_count, masked_count, masks))
+// }
 
 pub fn parse_msg_packet(data: &[u8]) -> Result<(String, String), String> {
     // Must start with 0x06

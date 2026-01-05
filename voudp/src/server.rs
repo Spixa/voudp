@@ -100,10 +100,6 @@ impl Remote {
             status: Default::default(),
         })
     }
-
-    fn mask(&mut self, mask: &str) {
-        self.mask = Some(String::from(mask));
-    }
 }
 
 type SafeRemote = Arc<Mutex<Remote>>;
@@ -275,11 +271,10 @@ impl ServerState {
         if data.len() < 4 {
             return;
         }
-        // this is painful:
-        let chan_id = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
 
+        let chan_id = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         info!("{} has joined the channel with id {}", addr, chan_id);
-        // move remote to new channel or create new remote if it is new
+
         let remote = self.remotes.entry(addr).or_insert_with(|| {
             info!("{} is a new remote", addr);
             Arc::new(Mutex::new(
@@ -287,23 +282,28 @@ impl ServerState {
             ))
         });
 
-        // remove from previous channel:
-        {
-            let mut remote = remote.lock().unwrap();
+        let old_channel_id = {
+            let mut remote_guard = remote.lock().unwrap();
+            let old_id = remote_guard.channel_id;
+            remote_guard.channel_id = chan_id;
+            old_id
+        };
 
-            if let Some(prev_chan) = self.channels.get_mut(&remote.channel_id) {
-                prev_chan.remove_remote(&addr);
+        if old_channel_id != chan_id && old_channel_id != 0 {
+            if let Some(old_channel) = self.channels.get_mut(&old_channel_id) {
+                old_channel.remove_remote(&addr);
             }
-            remote.channel_id = chan_id;
         }
 
-        // get the channel that the remote is trying to join, or create it if it doesn't exist
+        // add to new channel
         let channel = self
             .channels
             .entry(chan_id)
             .or_insert_with(|| Channel::new(self.config));
 
-        channel.add_remote(remote.to_owned());
+        if let Some(remote) = self.remotes.get(&addr) {
+            channel.add_remote(remote.clone());
+        }
     }
 
     fn handle_audio(&mut self, addr: SocketAddr, data: &[u8]) {
@@ -355,55 +355,52 @@ impl ServerState {
 
     // TODO: announce old mask in join message incase of renicking
     fn handle_mask(&mut self, addr: SocketAddr, data: &[u8]) {
-        let (new_mask, _old_mask, channel_id) = {
+        let (new_mask, channel_id, peer_addresses) = {
             let Some(remote) = self.remotes.get(&addr) else {
                 warn!("Mask from unknown remote: {}, skipping request...", addr);
                 return;
             };
 
-            let (channel_id, mask) = {
-                let remote = remote.lock().unwrap();
-                (remote.channel_id, remote.mask.clone())
-            };
-            let Ok(new_mask) = String::from_utf8(data.to_vec()) else {
-                warn!("Mask sent over is not UTF-8, skipping request...");
-                return;
-            };
-
-            let old_mask = match mask {
-                Some(old_mask) => {
-                    info!(
-                        "\"{}\" has changed their mask to \"{}\" ({})",
-                        old_mask, new_mask, addr
-                    );
-                    Some(old_mask)
-                }
-                None => {
-                    info!(
-                        "\"{}\" has masked for the first time to \"{}\"",
-                        addr, new_mask
-                    );
-                    None
+            let remote_guard = remote.lock().unwrap();
+            let channel_id = remote_guard.channel_id;
+            let new_mask = match String::from_utf8(data.to_vec()) {
+                Ok(mask) => mask,
+                Err(_) => {
+                    warn!("Mask sent over is not UTF-8, skipping request...");
+                    return;
                 }
             };
 
-            let mut remote = remote.lock().unwrap();
-            remote.mask(&new_mask);
+            drop(remote_guard);
+            remote.lock().unwrap().mask = Some(new_mask.clone());
 
-            (new_mask, old_mask, channel_id)
+            let peer_addresses: Vec<SocketAddr> =
+                if let Some(channel) = self.channels.get(&channel_id) {
+                    channel
+                        .remotes
+                        .iter()
+                        .map(|r| r.lock().unwrap().addr)
+                        .filter(|&a| a != addr)
+                        .collect()
+                } else {
+                    Vec::new()
+                };
+
+            (new_mask, channel_id, peer_addresses)
         };
 
+        info!(
+            "{} has masked as '{}' in channel {}",
+            addr, new_mask, channel_id
+        );
+
+        // Broadcast to all remotes in the channel
         let mut packet = vec![0x0a];
         packet.extend_from_slice(new_mask.as_bytes());
 
-        // Broadcast to all remotes in the channel
-        if let Some(channel) = self.channels.get_mut(&channel_id) {
-            for peer in &channel.remotes {
-                let peer_addr = { peer.lock().unwrap().addr };
-
-                if let Err(e) = self.socket.send_to(&packet, peer_addr) {
-                    warn!("Failed to send leave packet to {}: {:?}", peer_addr, e);
-                }
+        for peer_addr in peer_addresses {
+            if let Err(e) = self.socket.send_to(&packet, peer_addr) {
+                warn!("Failed to send mask packet to {}: {:?}", peer_addr, e);
             }
         }
     }
@@ -416,59 +413,64 @@ impl ServerState {
             );
             return;
         };
-        let remote = remote.lock().unwrap();
 
-        let Some(channel) = self.channels.get(&remote.channel_id) else {
-            warn!(
-                "Failed to retrieve the channel of remote {}, skipping request...",
-                addr
-            );
-            return;
+        let remote_chan_id = {
+            let remote = remote.lock().unwrap();
+            remote.channel_id
         };
 
-        // prevent locking (we will lock later)
-        drop(remote);
+        let mut channels_info = Vec::new();
 
-        // TODO: make this lazy. do not compute per-request
-        let (masked, unmasked_count): (Vec<(String, bool, bool)>, u32) = channel
-            .remotes
-            .iter()
-            .map(|r| {
-                let r = r.lock().unwrap();
-                (
-                    r.mask.clone(),
-                    r.status.mute, // bool
-                    r.status.deaf, // bool
-                )
-            })
-            .fold(
-                (vec![], 0),
-                |(mut masks, count), (mask_opt, muted, deafened)| {
-                    if let Some(mask) = mask_opt {
-                        masks.push((mask, muted, deafened));
-                        (masks, count)
-                    } else {
-                        (masks, count + 1)
-                    }
-                },
-            );
+        for (&chan_id, chan) in &self.channels {
+            if chan.remotes.is_empty() {
+                continue;
+            }
 
-        // build payload
-        let mut payload = Vec::new();
-        for (mask, muted, deafened) in &masked {
-            payload.extend_from_slice(mask.as_bytes());
-            payload.push(0x01);
-            let flags = (*muted as u8) | ((*deafened as u8) << 1);
-            payload.push(flags);
+            let (masked_users, unmasked_count): (Vec<(String, bool, bool)>, u32) = chan
+                .remotes
+                .iter()
+                .map(|r| {
+                    let r = r.lock().unwrap();
+                    (r.mask.clone(), r.status.mute, r.status.deaf)
+                })
+                .fold(
+                    (vec![], 0),
+                    |(mut masks, count), (mask_opt, muted, deafened)| {
+                        if let Some(mask) = mask_opt {
+                            masks.push((mask, muted, deafened));
+                            (masks, count)
+                        } else {
+                            (masks, count + 1)
+                        }
+                    },
+                );
+
+            let mut channel_info = Vec::new();
+            channel_info.extend_from_slice(&chan_id.to_be_bytes());
+            channel_info.extend_from_slice(&unmasked_count.to_be_bytes());
+            channel_info.extend_from_slice(&(masked_users.len() as u32).to_be_bytes());
+
+            for (mask, muted, deafened) in &masked_users {
+                channel_info.extend_from_slice(mask.as_bytes());
+                channel_info.push(0x01);
+                let flags = (*muted as u8) | ((*deafened as u8) << 1);
+                channel_info.push(flags);
+            }
+
+            channels_info.push(channel_info);
         }
 
-        // final packet
         let mut list_packet = vec![0x05];
-        list_packet.extend_from_slice(&unmasked_count.to_be_bytes());
-        list_packet.extend_from_slice(&(masked.len() as u32).to_be_bytes());
-        list_packet.extend_from_slice(&payload);
+        list_packet.extend_from_slice(&remote_chan_id.to_be_bytes());
+        list_packet.extend_from_slice(&(channels_info.len() as u32).to_be_bytes());
 
-        self.socket.send_to(&list_packet, addr).unwrap();
+        for chan_info in channels_info {
+            list_packet.extend_from_slice(&chan_info);
+        }
+
+        if let Err(e) = self.socket.send_to(&list_packet, addr) {
+            warn!("Failed to send global list to {}: {}", addr, e);
+        }
     }
 
     fn handle_chat(&mut self, addr: SocketAddr, data: &[u8]) {

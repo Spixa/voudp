@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::util::{self, SecureUdpSocket};
+use crate::util::{self, ChannelInfo, SecureUdpSocket};
 
 const TARGET_FRAME_SIZE: usize = 960; // 20ms at 48kHz
 const BUFFER_CAPACITY: usize = TARGET_FRAME_SIZE * 10; // 10 frames
@@ -46,13 +46,13 @@ pub enum Message {
     Broadcast(String, String),
 }
 
-#[derive(Default)]
-pub struct ChannelList {
-    pub unmasked: u32,
-    pub masked: Vec<(String, bool, bool)>,
+pub struct GlobalListState {
+    pub channels: Vec<ChannelInfo>,
+    pub last_updated: Instant,
+    pub current_channel: u32,
 }
 
-type SafeChannelList = Arc<Mutex<ChannelList>>;
+type SafeChannelList = Arc<Mutex<GlobalListState>>;
 
 impl ClientState {
     pub fn new(ip: &str, channel_id: u32, phrase: &[u8]) -> Result<Self, io::Error> {
@@ -67,21 +67,28 @@ impl ClientState {
             deafened: Arc::new(AtomicBool::new(false)),
             connected: Arc::new(AtomicBool::new(true)),
             channel_id: Arc::new(Mutex::new(channel_id)),
-            list: Default::default(),
+            list: Arc::new(Mutex::new(GlobalListState {
+                channels: vec![],
+                last_updated: Instant::now(),
+                current_channel: 0,
+            })),
             talking: Arc::new(AtomicBool::new(false)),
             rx: None,
             state: Arc::new(Mutex::new(State::Fine)),
         })
     }
 
-    pub fn run(&mut self, mode: Mode) -> Result<()> {
+    pub fn join(&self, id: u32) -> Result<usize, std::io::Error> {
         let join_packet = {
-            let id = self.channel_id.lock().unwrap();
             let mut p = vec![0x01];
             p.extend_from_slice(&id.to_be_bytes());
             p
         };
 
+        self.socket.send(&join_packet)
+    }
+
+    pub fn run(&mut self, mode: Mode) -> Result<()> {
         let socket = self.socket.clone();
         let muted = self.muted.clone();
         let deafened = self.deafened.clone();
@@ -92,14 +99,20 @@ impl ClientState {
         let (tx, rx) = mpsc::channel::<OwnedMessage>();
 
         self.rx = Some(rx);
+        let id = { self.channel_id.lock().unwrap() };
         match mode {
             Mode::Repl => {
-                self.socket.send(&join_packet)?;
+                self.join(*id)?;
                 Self::start_audio(
                     socket, muted, deafened, connected, state, list, tx, mode, talking,
                 )?;
             }
             Mode::Gui => {
+                let join_packet = {
+                    let mut p = vec![0x01];
+                    p.extend_from_slice(&id.to_be_bytes());
+                    p
+                };
                 thread::spawn(move || {
                     if let Err(e) = socket.send(&join_packet) {
                         eprintln!("send error: {e:?}");
@@ -341,15 +354,16 @@ impl ClientState {
                 }
                 Ok((size, _)) if size > 1 && recv_buf[0] == 0x05 => {
                     let packet = &recv_buf[..size];
-                    let Some(parsed) = util::parse_list_packet(packet) else {
+                    let Some(parsed) = util::parse_global_list(&packet[1..]) else {
                         eprintln!("error: Received bad list");
                         continue;
                     };
 
                     {
                         let mut list = list.lock().unwrap();
-                        list.masked = parsed.2;
-                        list.unmasked = parsed.0;
+                        list.channels = parsed.0;
+                        list.current_channel = parsed.1;
+                        list.last_updated = Instant::now();
                     }
                 }
                 Ok((size, _)) if size > 1 && recv_buf[0] == 0x06 => {
@@ -445,20 +459,22 @@ impl ClientState {
                 }
                 "l" | "list" => {
                     let list = list.lock().unwrap();
-                    println!(
-                        "Unmasked: {} -- Masked: {}",
-                        list.unmasked,
-                        list.masked.len()
-                    );
+                    for ch in &list.channels {
+                        println!(
+                            "Unmasked: {} -- Masked: {}",
+                            ch.unmasked_count,
+                            ch.masked_users.len()
+                        );
 
-                    if !list.masked.is_empty() {
-                        println!("Masked list: ");
+                        if !ch.masked_users.is_empty() {
+                            println!("Masked list: ");
 
-                        for person in list.masked.iter() {
-                            println!(
-                                "\t● {} (Muted: {}) (Deafened: {})",
-                                person.0, person.1, person.2
-                            );
+                            for person in ch.masked_users.iter() {
+                                println!(
+                                    "\t● {} (Muted: {}) (Deafened: {})",
+                                    person.0, person.1, person.2
+                                );
+                            }
                         }
                     }
                 }
