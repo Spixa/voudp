@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+# audiopus_sys = { version = "0.2.2", features = ["bindgen"] }
 cpal = "0.15"
 opus = "0.3"
 anyhow = "1"

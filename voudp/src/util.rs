@@ -1,16 +1,24 @@
 use std::io;
 use std::io::Write;
 use std::net::{SocketAddr, ToSocketAddrs, UdpSocket};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use chacha20poly1305::aead::rand_core::RngCore;
 use chacha20poly1305::aead::{Aead, OsRng};
 use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit, Nonce};
+use log::warn;
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
 
 use crate::client::Message;
 
 pub const VOUDP_SALT: &[u8; 5] = b"voudp";
+
+// internal flags for packet processing:
+const RELIABLE_FLAG: u8 = 0x80;
+const ACK_FLAG: u8 = 0x81;
+
+type List = (u32, u32, Vec<(String, bool, bool)>);
 
 pub fn ask(prompt: &str) -> String {
     print!("{}", prompt);
@@ -23,7 +31,7 @@ pub fn ask(prompt: &str) -> String {
     answer.trim().into()
 }
 
-pub fn parse_list_packet(bytes: &[u8]) -> Option<(u32, u32, Vec<(String, bool, bool)>)> {
+pub fn parse_list_packet(bytes: &[u8]) -> Option<List> {
     if bytes.len() < 9 || bytes[0] != 0x05 {
         return None;
     }
@@ -136,6 +144,7 @@ pub struct SecureUdpSocket {
     socket: UdpSocket,
     connected_addr: Option<SocketAddr>,
     cipher: ChaCha20Poly1305,
+    seq_counter: AtomicU32,
 }
 
 impl Clone for SecureUdpSocket {
@@ -148,6 +157,7 @@ impl Clone for SecureUdpSocket {
             socket: cloned_socket,
             connected_addr: self.connected_addr,
             cipher,
+            seq_counter: AtomicU32::new(self.seq_counter.load(Ordering::Relaxed)),
         }
     }
 }
@@ -163,6 +173,7 @@ impl SecureUdpSocket {
             socket,
             connected_addr: None,
             cipher,
+            seq_counter: AtomicU32::new(1),
         })
     }
 
@@ -207,6 +218,27 @@ impl SecureUdpSocket {
         self.socket.send_to(&packet, addr)
     }
 
+    pub fn send_reliable_to(&self, buf: &[u8], addr: SocketAddr) -> Result<u32, io::Error> {
+        let seq = self.seq_counter.fetch_add(1, Ordering::Relaxed);
+
+        let mut wrapped = Vec::with_capacity(1 + 4 * buf.len());
+        wrapped.push(RELIABLE_FLAG);
+        wrapped.extend_from_slice(&seq.to_be_bytes());
+        wrapped.extend_from_slice(buf);
+
+        self.send_to(&wrapped, addr)?;
+
+        Ok(seq)
+    }
+
+    pub fn send_ack(&self, seq: u32, addr: SocketAddr) -> io::Result<usize> {
+        let mut ack_plain = [0u8; 5];
+        ack_plain[0] = ACK_FLAG;
+        ack_plain[1..4].copy_from_slice(&seq.to_be_bytes());
+
+        self.send_to(&ack_plain, addr)
+    }
+
     /// layout: [12-byte nonce + ciphertext + tag]
     pub fn recv_from(
         &self,
@@ -247,7 +279,40 @@ impl SecureUdpSocket {
             }
         };
 
-        // overwrite buffer with plaintext
+        // check if it has flags:
+
+        // 1. ack
+        if plaintext.len() >= 5 && plaintext[0] == ACK_FLAG {
+            // let seq = u32::from_be_bytes([plaintext[1], plaintext[2], plaintext[3], plaintext[4]]);
+            return Ok((0, addr));
+        }
+
+        // 2. reliable send
+        if plaintext.len() >= 5 && plaintext[0] == RELIABLE_FLAG {
+            let seq = u32::from_be_bytes([plaintext[1], plaintext[2], plaintext[3], plaintext[4]]);
+
+            if let Err(e) = self.send_ack(seq, addr) {
+                warn!("Failed to send ack {} to {}: {}", seq, addr, e);
+            }
+
+            let inner = &plaintext[5..];
+            if inner.len() > buf.len() {
+                return Err((
+                    io::Error::new(io::ErrorKind::InvalidData, "inner too large"),
+                    addr,
+                ));
+            }
+            buf[..inner.len()].copy_from_slice(inner);
+            return Ok((inner.len(), addr));
+        }
+
+        // 3. regular mode: overwrite buffer with plaintext
+        if plaintext.len() > buf.len() {
+            return Err((
+                io::Error::new(io::ErrorKind::InvalidData, "plaintext too large"),
+                addr,
+            ));
+        }
         buf[..plaintext.len()].copy_from_slice(&plaintext);
 
         Ok((plaintext.len(), addr))

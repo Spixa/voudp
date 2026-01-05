@@ -1,6 +1,7 @@
 use std::{
     fs::File,
     io::Read,
+    path::Path,
     time::{Duration, Instant},
 };
 
@@ -46,6 +47,14 @@ impl MusicClientState {
         self.socket.send(&join_packet)?;
 
         println!("joined channel {}", self.channel_id);
+
+        let p = Path::new(&path)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap();
+        let mut nick_packet = vec![0x04];
+        nick_packet.extend_from_slice(format!("Music Bot (Playing: {})", p).as_bytes());
+        let _ = self.socket.send(&nick_packet);
 
         let mut opus_encoder = Encoder::new(
             TARGET_SAMPLE_RATE,
@@ -346,10 +355,16 @@ fn resample(
     // Interleave resampled channels
     let mut resampled_interleaved = Vec::with_capacity(new_len * channels);
     for i in 0..new_len {
-        for ch in 0..channels {
-            resampled_interleaved.push(resampled_channels[ch][i]);
+        for ch in resampled_channels.iter().take(channels) {
+            resampled_interleaved.push(ch[i]);
         }
     }
 
     Ok(resampled_interleaved)
+}
+
+impl Drop for MusicClientState {
+    fn drop(&mut self) {
+        let _ = self.socket.send(&[0x03]); // EOF packet
+    }
 }

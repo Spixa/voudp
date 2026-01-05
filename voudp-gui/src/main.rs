@@ -2,7 +2,7 @@ use anyhow::Result;
 use chrono::{DateTime, Local};
 use core::f32;
 use eframe::{NativeOptions, egui};
-use egui::{Color32, RichText};
+use egui::{Color32, Id, RichText};
 use log::info;
 use std::{
     sync::{Arc, Mutex, RwLock, mpsc::TryRecvError},
@@ -376,22 +376,22 @@ impl eframe::App for GuiClientApp {
                     });
 
                 egui::TopBottomPanel::bottom("input_panel")
-                    .show_separator_line(false)
+                    .show_separator_line(true)
                     .show_inside(ui, |ui| {
                         ui.horizontal(|ui| {
+                            self.talking_indicator(ui);
+
+                            let available_width = ui.available_width() - 115.0;
                             let text_edit = egui::TextEdit::singleline(&mut self.input)
                                 .hint_text("type your message...")
                                 .text_color(Color32::from_rgb(255, 215, 0));
 
-                            let response =
-                                ui.add_sized([ui.available_width() - 130.0, 24.0], text_edit);
+                            let response = ui.add_sized([available_width, 24.0], text_edit);
 
-                            // width is fixed
                             ui.add_sized([60.0, 24.0], egui::Button::new("Send"))
                                 .clicked()
                                 .then(|| self.send_message());
 
-                            // regain focus when we send
                             if response.lost_focus()
                                 && ui.input(|i| i.key_pressed(egui::Key::Enter))
                             {
@@ -487,6 +487,39 @@ impl eframe::App for GuiClientApp {
 }
 
 impl GuiClientApp {
+    fn talking_indicator(&mut self, ui: &mut egui::Ui) -> egui::Response {
+        let is_talking = self
+            .client
+            .clone()
+            .unwrap()
+            .lock()
+            .unwrap()
+            .talking
+            .load(std::sync::atomic::Ordering::Relaxed);
+
+        let response = ui.add(egui::Label::new(""));
+
+        if is_talking {
+            let time = ui.input(|i| i.time);
+            let pulse = 0.5 + 0.5 * (time * 3.0).sin();
+
+            let center = response.rect.center();
+            ui.painter().circle_filled(
+                center,
+                6.0,
+                Color32::from_rgba_premultiplied(0, 255, 0, (220.0 * pulse) as u8),
+            );
+
+            if response.hovered() {
+                egui::show_tooltip_at_pointer(ui.ctx(), Id::new("talking_tooltip"), |ui| {
+                    ui.label("Voice activity detected")
+                });
+            }
+        }
+
+        response
+    }
+
     fn write_log(&mut self, log: String, color: Color32) {
         self.logs.write().unwrap().push((log, color, Local::now()));
     }

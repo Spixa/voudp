@@ -32,6 +32,7 @@ pub struct ClientState {
     connected: Arc<AtomicBool>,
     channel_id: Arc<Mutex<u32>>,
     pub list: SafeChannelList,
+    pub talking: Arc<AtomicBool>,
     pub rx: Option<Receiver<OwnedMessage>>,
     pub state: Arc<Mutex<State>>,
 }
@@ -67,6 +68,7 @@ impl ClientState {
             connected: Arc::new(AtomicBool::new(true)),
             channel_id: Arc::new(Mutex::new(channel_id)),
             list: Default::default(),
+            talking: Arc::new(AtomicBool::new(false)),
             rx: None,
             state: Arc::new(Mutex::new(State::Fine)),
         })
@@ -86,14 +88,16 @@ impl ClientState {
         let connected = self.connected.clone();
         let list = self.list.clone();
         let state = self.state.clone();
-
+        let talking = self.talking.clone();
         let (tx, rx) = mpsc::channel::<OwnedMessage>();
 
         self.rx = Some(rx);
         match mode {
             Mode::Repl => {
                 self.socket.send(&join_packet)?;
-                Self::start_audio(socket, muted, deafened, connected, state, list, tx, mode)?;
+                Self::start_audio(
+                    socket, muted, deafened, connected, state, list, tx, mode, talking,
+                )?;
             }
             Mode::Gui => {
                 thread::spawn(move || {
@@ -101,9 +105,9 @@ impl ClientState {
                         eprintln!("send error: {e:?}");
                         return;
                     }
-                    if let Err(e) =
-                        Self::start_audio(socket, muted, deafened, connected, state, list, tx, mode)
-                    {
+                    if let Err(e) = Self::start_audio(
+                        socket, muted, deafened, connected, state, list, tx, mode, talking,
+                    ) {
                         eprintln!("audio thread error: {e:?}");
                     }
                 });
@@ -123,6 +127,7 @@ impl ClientState {
         list: SafeChannelList,
         tx: Sender<OwnedMessage>,
         mode: Mode,
+        talking: Arc<AtomicBool>,
     ) -> Result<()> {
         let muted_clone = muted.clone();
         let deafened_clone = deafened.clone();
@@ -208,6 +213,15 @@ impl ClientState {
                                 buffer.push_back(0.0);
                             }
                         }
+                    }
+
+                    let sum_sq: f32 = buffer.iter().map(|s| s * s).sum();
+                    let rms = (sum_sq / buffer.len() as f32).sqrt();
+
+                    if rms < 0.07 {
+                        talking.store(false, Ordering::Relaxed);
+                    } else {
+                        talking.store(true, Ordering::Relaxed);
                     }
                 },
                 |err| eprintln!("input stream error: {err:?}"),
@@ -313,22 +327,22 @@ impl ClientState {
             match socket.recv_from(&mut recv_buf) {
                 Ok((size, _)) if size > 1 && recv_buf[0] == 0x02 => {
                     let mut pcm = vec![0.0f32; TARGET_FRAME_SIZE * 2];
-                    if let Ok(decoded) = decoder.decode_float(&recv_buf[1..size], &mut pcm, false) {
-                        if decoded > 0 {
-                            let mut buffer = output.lock().unwrap();
-                            for s in &pcm[..(decoded * 2)] {
-                                if buffer.len() >= BUFFER_CAPACITY * 2 {
-                                    buffer.pop_front();
-                                }
-                                buffer.push_back(*s);
+                    if let Ok(decoded) = decoder.decode_float(&recv_buf[1..size], &mut pcm, false)
+                        && decoded > 0
+                    {
+                        let mut buffer = output.lock().unwrap();
+                        for s in &pcm[..(decoded * 2)] {
+                            if buffer.len() >= BUFFER_CAPACITY * 2 {
+                                buffer.pop_front();
                             }
+                            buffer.push_back(*s);
                         }
                     }
                 }
                 Ok((size, _)) if size > 1 && recv_buf[0] == 0x05 => {
                     let packet = &recv_buf[..size];
                     let Some(parsed) = util::parse_list_packet(packet) else {
-                        println!("error: Received bad list");
+                        eprintln!("error: Received bad list");
                         continue;
                     };
 
