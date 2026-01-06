@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::util::{self, ChannelInfo, SecureUdpSocket};
+use crate::util::{self, ChannelInfo, SecureUdpSocket, ServerCommand};
 
 const TARGET_FRAME_SIZE: usize = 960; // 20ms at 48kHz
 const BUFFER_CAPACITY: usize = TARGET_FRAME_SIZE * 10; // 10 frames
@@ -26,7 +26,7 @@ pub enum State {
 }
 
 pub struct ClientState {
-    socket: SecureUdpSocket,
+    pub socket: SecureUdpSocket,
     muted: Arc<AtomicBool>,
     deafened: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
@@ -35,6 +35,7 @@ pub struct ClientState {
     pub talking: Arc<AtomicBool>,
     pub rx: Option<Receiver<OwnedMessage>>,
     pub state: Arc<Mutex<State>>,
+    pub cmd_list: SafeCommandList,
 }
 
 type OwnedMessage = (Message, DateTime<Local>);
@@ -53,6 +54,7 @@ pub struct GlobalListState {
 }
 
 type SafeChannelList = Arc<Mutex<GlobalListState>>;
+type SafeCommandList = Arc<Mutex<Vec<ServerCommand>>>;
 
 impl ClientState {
     pub fn new(ip: &str, channel_id: u32, phrase: &[u8]) -> Result<Self, io::Error> {
@@ -75,6 +77,7 @@ impl ClientState {
             talking: Arc::new(AtomicBool::new(false)),
             rx: None,
             state: Arc::new(Mutex::new(State::Fine)),
+            cmd_list: Arc::new(Mutex::new(vec![])),
         })
     }
 
@@ -94,6 +97,7 @@ impl ClientState {
         let deafened = self.deafened.clone();
         let connected = self.connected.clone();
         let list = self.list.clone();
+        let cmd_list = self.cmd_list.clone();
         let state = self.state.clone();
         let talking = self.talking.clone();
         let (tx, rx) = mpsc::channel::<OwnedMessage>();
@@ -104,7 +108,7 @@ impl ClientState {
             Mode::Repl => {
                 self.join(*id)?;
                 Self::start_audio(
-                    socket, muted, deafened, connected, state, list, tx, mode, talking,
+                    socket, muted, deafened, connected, state, list, cmd_list, tx, mode, talking,
                 )?;
             }
             Mode::Gui => {
@@ -119,7 +123,8 @@ impl ClientState {
                         return;
                     }
                     if let Err(e) = Self::start_audio(
-                        socket, muted, deafened, connected, state, list, tx, mode, talking,
+                        socket, muted, deafened, connected, state, list, cmd_list, tx, mode,
+                        talking,
                     ) {
                         eprintln!("audio thread error: {e:?}");
                     }
@@ -138,6 +143,7 @@ impl ClientState {
         connected: Arc<AtomicBool>,
         state: Arc<Mutex<State>>,
         list: SafeChannelList,
+        cmd_list: SafeCommandList,
         tx: Sender<OwnedMessage>,
         mode: Mode,
         talking: Arc<AtomicBool>,
@@ -160,6 +166,7 @@ impl ClientState {
             let connected_clone = Arc::clone(&connected);
             let state_clone = Arc::clone(&state);
             let list = list.clone();
+            let cmd_list = cmd_list.clone();
             thread::spawn(move || {
                 Self::network_thread(
                     socket,
@@ -169,6 +176,7 @@ impl ClientState {
                     tx,
                     connected_clone,
                     state_clone,
+                    cmd_list,
                 )
             });
         }
@@ -292,6 +300,7 @@ impl ClientState {
         tx: Sender<OwnedMessage>,
         connected: Arc<AtomicBool>,
         state: Arc<Mutex<State>>,
+        cmd_list: SafeCommandList,
     ) {
         let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
         let mut decoder = Decoder::new(48000, Channels::Stereo).unwrap();
@@ -309,7 +318,9 @@ impl ClientState {
             // send
             if test.elapsed() > Duration::from_secs(1) {
                 let list_packet = vec![0x05];
+                let cmd_list_packet = vec![0x0c];
                 socket.send(&list_packet).unwrap();
+                socket.send(&cmd_list_packet).unwrap();
                 test = Instant::now();
             }
 
@@ -379,6 +390,12 @@ impl ClientState {
                 Ok((size, _)) if size > 1 && (recv_buf[0] == 0x0a || recv_buf[0] == 0x0b) => {
                     if let Some(msg) = util::parse_flow_packet(&recv_buf[..size]) {
                         let _ = tx.send((msg, Local::now()));
+                    }
+                }
+                Ok((size, _)) if size > 1 && recv_buf[0] == 0x0c => {
+                    if let Some(commands) = util::parse_command_list(&recv_buf[1..size]) {
+                        let mut list = cmd_list.lock().unwrap();
+                        *list = commands;
                     }
                 }
                 Ok((_, _)) => {}
@@ -521,5 +538,11 @@ impl ClientState {
 
     pub fn send(&self, packet: &[u8]) {
         let _ = self.socket.send(packet);
+    }
+
+    pub fn send_command(&self, command: &str) {
+        let mut packet = vec![0x0d];
+        packet.extend_from_slice(command.as_bytes());
+        let _ = self.socket.send(&packet);
     }
 }

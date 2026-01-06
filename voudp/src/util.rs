@@ -25,6 +25,42 @@ pub struct ChannelInfo {
     pub masked_users: Vec<(String, bool, bool)>,
 }
 
+#[derive(Debug, Clone)]
+pub struct ServerCommand {
+    pub name: String,
+    pub description: String,
+    pub usage: String,
+    pub category: CommandCategory,
+    pub aliases: Vec<String>,
+    pub requires_auth: bool,
+    pub admin_only: bool,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum CommandCategory {
+    User,
+    Channel,
+    Audio,
+    Chat,
+    Admin,
+    Utility,
+    Fun,
+}
+
+#[derive(Debug, Clone)]
+pub enum CommandResult {
+    Success(String),
+    Error(String),
+    Silent,
+}
+pub struct CommandContext {
+    pub sender_addr: SocketAddr,
+    pub sender_mask: Option<String>,
+    pub channel_id: u32,
+    pub arguments: Vec<String>,
+    pub is_admin: bool,
+}
+
 pub fn ask(prompt: &str) -> String {
     print!("{}", prompt);
     std::io::stdout().flush().unwrap();
@@ -84,6 +120,102 @@ pub fn parse_global_list(bytes: &[u8]) -> Option<(Vec<ChannelInfo>, u32)> {
     }
 
     Some((channels, current))
+}
+
+pub fn parse_command_list(bytes: &[u8]) -> Option<Vec<ServerCommand>> {
+    if bytes.len() < 2 {
+        return None;
+    }
+
+    let count = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
+    let mut commands = Vec::new();
+    let mut i = 2;
+
+    for _ in 0..count {
+        if i >= bytes.len() {
+            return None;
+        }
+
+        // Parse name
+        let name_len = bytes[i] as usize;
+        i += 1;
+        if i + name_len > bytes.len() {
+            return None;
+        }
+        let name = String::from_utf8(bytes[i..i + name_len].to_vec()).ok()?;
+        i += name_len;
+
+        // Parse description
+        let desc_len = bytes[i] as usize;
+        i += 1;
+        if i + desc_len > bytes.len() {
+            return None;
+        }
+        let description = String::from_utf8(bytes[i..i + desc_len].to_vec()).ok()?;
+        i += desc_len;
+
+        // Parse usage
+        let usage_len = bytes[i] as usize;
+        i += 1;
+        if i + usage_len > bytes.len() {
+            return None;
+        }
+        let usage = String::from_utf8(bytes[i..i + usage_len].to_vec()).ok()?;
+        i += usage_len;
+
+        // Parse category
+        let category_byte = bytes[i];
+        i += 1;
+        let category = match category_byte {
+            0 => CommandCategory::User,
+            1 => CommandCategory::Channel,
+            2 => CommandCategory::Audio,
+            3 => CommandCategory::Chat,
+            4 => CommandCategory::Admin,
+            5 => CommandCategory::Utility,
+            6 => CommandCategory::Fun,
+            _ => return None,
+        };
+
+        // Parse flags
+        let flags = bytes[i];
+        i += 1;
+        let requires_auth = flags & 0b00000001 != 0;
+        let admin_only = flags & 0b00000010 != 0;
+
+        // Parse aliases
+        let alias_count = bytes[i] as usize;
+        i += 1;
+        let mut aliases = Vec::new();
+
+        for _ in 0..alias_count {
+            if i >= bytes.len() {
+                return None;
+            }
+
+            let alias_len = bytes[i] as usize;
+            i += 1;
+            if i + alias_len > bytes.len() {
+                return None;
+            }
+
+            let alias = String::from_utf8(bytes[i..i + alias_len].to_vec()).ok()?;
+            i += alias_len;
+            aliases.push(alias);
+        }
+
+        commands.push(ServerCommand {
+            name,
+            description,
+            usage,
+            category,
+            aliases,
+            requires_auth,
+            admin_only,
+        });
+    }
+
+    Some(commands)
 }
 
 // pub fn parse_list_packet(bytes: &[u8]) -> Option<List> {

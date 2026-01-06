@@ -13,8 +13,9 @@ use std::{
 };
 
 use crate::{
+    commands::CommandSystem,
     mixer,
-    util::{self, ControlRequest, SecureUdpSocket},
+    util::{self, CommandCategory, CommandContext, CommandResult, ControlRequest, SecureUdpSocket},
 };
 const JITTER_BUFFER_LEN: usize = 50;
 
@@ -104,6 +105,7 @@ impl Remote {
 
 type SafeRemote = Arc<Mutex<Remote>>;
 struct Channel {
+    name: Option<String>,
     remotes: Vec<SafeRemote>,
     buffers: HashMap<SocketAddr, Vec<f32>>,
     filter_states: HashMap<SocketAddr, (f32, f32)>,
@@ -114,11 +116,16 @@ impl Channel {
     fn new(server_config: ServerConfig) -> Self {
         info!("Created new channel");
         Self {
+            name: None,
             remotes: vec![],
             buffers: HashMap::new(),
             filter_states: HashMap::new(),
             server_config,
         }
+    }
+
+    fn name(&mut self, name: String) {
+        self.name = Some(name);
     }
 
     fn add_remote(&mut self, remote: SafeRemote) {
@@ -224,6 +231,7 @@ pub struct ServerState {
     channels: HashMap<u32, Channel>,
     audio_rb: HeapRb<(SocketAddr, Vec<u8>)>,
     config: ServerConfig,
+    command_system: CommandSystem,
 }
 
 impl ServerState {
@@ -244,6 +252,7 @@ impl ServerState {
             channels: HashMap::new(),
             audio_rb: HeapRb::new(config.max_users),
             config,
+            command_system: CommandSystem::new(),
         })
     }
 
@@ -260,6 +269,8 @@ impl ServerState {
             0x05 => self.handle_list(addr),
             0x06 => self.handle_chat(addr, &data[1..]),
             0x08 => self.handle_ctrl(addr, &data[1..]),
+            0x0c => self.handle_sync_commands(addr),
+            0x0d => self.handle_cmd(addr, &data[1..]),
             _ => error!(
                 "{} sent an invalid packet (starts with {:#?})",
                 addr, data[0]
@@ -297,10 +308,11 @@ impl ServerState {
         }
 
         // add to new channel
-        let channel = self
-            .channels
-            .entry(chan_id)
-            .or_insert_with(|| Channel::new(self.config));
+        let channel = self.channels.entry(chan_id).or_insert_with(|| {
+            let mut c = Channel::new(self.config);
+            c.name(format!("channel-{}", chan_id));
+            c
+        });
 
         if let Some(remote) = self.remotes.get(&addr) {
             channel.add_remote(remote.clone());
@@ -548,9 +560,133 @@ impl ServerState {
         }
     }
 
+    pub fn handle_cmd(&mut self, addr: SocketAddr, data: &[u8]) {
+        let input = match String::from_utf8(data.to_vec()) {
+            Ok(s) => s,
+            Err(_) => {
+                warn!("Invalid UTF-8 in command from {}", addr);
+                return;
+            }
+        };
+
+        let (mask, channel_id, is_admin) = {
+            let Some(remote) = self.remotes.get(&addr) else {
+                warn!("Command from unknown remote: {}", addr);
+                return;
+            };
+
+            let remote = remote.lock().unwrap();
+            (remote.mask.clone(), remote.channel_id, false)
+        };
+
+        // execute command
+        let result = self.execute_command(&input, addr, mask.as_deref(), channel_id, is_admin);
+
+        match result {
+            CommandResult::Success(msg) => {
+                let mut packet = vec![0x0e]; // command success response 
+                packet.extend_from_slice(msg.as_bytes());
+                let _ = self.socket.send_to(&packet, addr);
+            }
+            CommandResult::Error(msg) => {
+                let mut packet = vec![0x0f]; // command fail response 
+                packet.extend_from_slice(msg.as_bytes());
+                let _ = self.socket.send_to(&packet, addr);
+            }
+            CommandResult::Silent => {}
+        };
+    }
+
+    pub fn handle_sync_commands(&mut self, addr: SocketAddr) {
+        let is_admin = false;
+        let available_commands = self.command_system.get_commands_for_user(is_admin);
+
+        let mut packet = vec![0x0c];
+        packet.extend_from_slice(&(available_commands.len() as u16).to_be_bytes());
+
+        for cmd in available_commands {
+            packet.push(cmd.name.len() as u8);
+            packet.extend_from_slice(cmd.name.as_bytes());
+
+            packet.push(cmd.description.len() as u8);
+            packet.extend_from_slice(cmd.description.as_bytes());
+
+            packet.push(cmd.usage.len() as u8);
+            packet.extend_from_slice(cmd.usage.as_bytes());
+
+            let category_byte = match cmd.category {
+                CommandCategory::User => 0,
+                CommandCategory::Channel => 1,
+                CommandCategory::Audio => 2,
+                CommandCategory::Chat => 3,
+                CommandCategory::Admin => 4,
+                CommandCategory::Utility => 5,
+                CommandCategory::Fun => 6,
+            };
+            packet.push(category_byte);
+
+            let mut flags = 0u8;
+            if cmd.requires_auth {
+                flags |= 0b00000001;
+            }
+            if cmd.admin_only {
+                flags |= 0b00000010;
+            }
+            packet.push(flags);
+
+            packet.push(cmd.aliases.len() as u8);
+            for alias in &cmd.aliases {
+                packet.push(alias.len() as u8);
+                packet.extend_from_slice(alias.as_bytes());
+            }
+        }
+
+        if let Err(e) = self.socket.send_to(&packet, addr) {
+            warn!("Failed to send command sync to {}: {}", addr, e);
+        }
+    }
+
     pub fn handle_bad(&mut self, addr: SocketAddr) {
         warn!("{addr} sent a bad packet");
         let _ = self.socket.send_bad_packet_notice(addr);
+    }
+
+    fn execute_command(
+        &mut self,
+        input: &str,
+        sender_addr: SocketAddr,
+        sender_mask: Option<&str>,
+        channel_id: u32,
+        is_admin: bool,
+    ) -> CommandResult {
+        let (command, args) = match self.command_system.parse_command(input) {
+            Some((cmd, args)) => (cmd, args),
+            None => {
+                return CommandResult::Error(
+                    "Unknown command. Type /help for available commands.".to_string(),
+                );
+            }
+        };
+
+        if command.requires_auth && sender_mask.is_none() {
+            return CommandResult::Error("You need to set a nickname first with /nick".to_string());
+        }
+
+        if command.admin_only && !is_admin {
+            return CommandResult::Error(
+                "You don't have permission to use this command.".to_string(),
+            );
+        }
+
+        let _context = CommandContext {
+            sender_addr,
+            sender_mask: sender_mask.map(|s| s.to_string()),
+            channel_id,
+            arguments: args,
+            is_admin,
+        };
+
+        CommandResult::Silent
     }
 
     fn process_audio_tick(&mut self) {

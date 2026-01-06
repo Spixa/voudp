@@ -9,7 +9,10 @@ use std::{
     thread::{self, JoinHandle},
     time::Instant,
 };
-use voudp::client::{self, ClientState, GlobalListState, Message};
+use voudp::{
+    client::{self, ClientState, GlobalListState, Message},
+    util::{SecureUdpSocket, ServerCommand},
+};
 
 fn main() -> Result<()> {
     // Initialize logging
@@ -36,6 +39,8 @@ type LogVec = Arc<RwLock<Vec<(String, egui::Color32, DateTime<Local>)>>>;
 
 struct GuiClientApp {
     global_list: GlobalListState,
+    command_list: Vec<ServerCommand>,
+    socket: Option<SecureUdpSocket>,
     current_channel_id: u32,
     address: String,
     chan_id_text: String,
@@ -51,6 +56,9 @@ struct GuiClientApp {
     nick: String,
     nicked: bool,
     logs: LogVec,
+    show_command_suggestions: bool,
+    selected_suggestion: usize,
+    filter_text: String,
 }
 
 #[derive(Default)]
@@ -59,6 +67,11 @@ enum ShowMode {
     DontShow,
     ShowError,
     ShowMaskScreen,
+}
+
+enum CommandAction {
+    UseCommand(String),
+    ShowNickWarning,
 }
 
 #[derive(Default)]
@@ -77,6 +90,8 @@ impl Default for GuiClientApp {
                 last_updated: Instant::now(),
                 current_channel: 0,
             },
+            command_list: vec![],
+            socket: None,
             chan_id_text: "1".to_string(),
             phrase: "".to_string(),
             is_connected: false,
@@ -90,6 +105,9 @@ impl Default for GuiClientApp {
             logs: Default::default(),
             input: Default::default(),
             nick: Default::default(),
+            show_command_suggestions: false,
+            selected_suggestion: 0,
+            filter_text: String::new(),
         }
     }
 }
@@ -197,6 +215,8 @@ impl eframe::App for GuiClientApp {
                                 Ok(state) => {
                                     info!("Connected to server at {}", self.address);
 
+                                    self.socket = Some(state.socket.clone());
+
                                     self.write_log(
                                         format!(
                                             "Connected to {} in channel #{}",
@@ -233,6 +253,21 @@ impl eframe::App for GuiClientApp {
             });
         } else {
             self.update_global_list();
+            self.update_command_list();
+
+            if self.input.starts_with('/') && self.command_list.is_empty() {
+                self.request_command_list();
+            }
+
+            let typed_cmd = self
+                .input
+                .strip_prefix('/')
+                .map(|s| s.split_whitespace().next().unwrap_or(""))
+                .unwrap_or("");
+
+            self.filter_text = typed_cmd.to_string();
+            self.show_command_suggestions = self.input.starts_with('/') && !self.input.is_empty();
+
             egui::SidePanel::right("global_list_panel")
                 .resizable(true)
                 .default_width(250.0)
@@ -278,9 +313,12 @@ impl eframe::App for GuiClientApp {
                                         channel.channel_id == self.current_channel_id;
 
                                     let header = if is_current_channel {
-                                        RichText::new(format!("📢 Channel #{}", channel.channel_id))
-                                            .color(Color32::LIGHT_GREEN)
-                                            .strong()
+                                        RichText::new(format!(
+                                            "📢 Channel #{} (connected: stereo)",
+                                            channel.channel_id
+                                        ))
+                                        .color(Color32::LIGHT_GREEN)
+                                        .strong()
                                     } else {
                                         RichText::new(format!("🔈 Channel #{}", channel.channel_id))
                                             .color(Color32::LIGHT_BLUE)
@@ -509,24 +547,54 @@ impl eframe::App for GuiClientApp {
                 egui::TopBottomPanel::bottom("input_panel")
                     .show_separator_line(true)
                     .show_inside(ui, |ui| {
+                        let input_id = ui.make_persistent_id("chat_input");
+
                         ui.horizontal(|ui| {
                             self.talking_indicator(ui);
 
                             let available_width = ui.available_width() - 115.0;
                             let text_edit = egui::TextEdit::singleline(&mut self.input)
-                                .hint_text("type your message...")
+                                .hint_text("type your message/command...")
                                 .text_color(Color32::from_rgb(255, 215, 0));
 
                             let response = ui.add_sized([available_width, 24.0], text_edit);
 
+                            ui.memory_mut(|mem| {
+                                mem.data.insert_temp(response.id, response.clone())
+                            });
+
+                            if self.show_command_suggestions && !self.command_list.is_empty() {
+                                let handled = self.handle_command_nav(ui.ctx(), response.id);
+
+                                if !handled {
+                                    self.show_command_suggestions_ui(ui, input_id);
+                                }
+                            }
+
                             ui.add_sized([60.0, 24.0], egui::Button::new("Send"))
                                 .clicked()
-                                .then(|| self.send_message());
+                                .then(|| {
+                                    if self.input.starts_with('/') {
+                                        self.execute_command();
+                                    } else {
+                                        self.send_message();
+                                    }
+                                });
 
                             if response.lost_focus()
                                 && ui.input(|i| i.key_pressed(egui::Key::Enter))
                             {
-                                self.send_message();
+                                if self.input.starts_with('/') {
+                                    self.execute_command();
+                                } else {
+                                    self.send_message();
+                                }
+                                ui.memory_mut(|mem| mem.request_focus(response.id));
+                            }
+
+                            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Tab))
+                            {
+                                self.tab_complete();
                                 ui.memory_mut(|mem| mem.request_focus(response.id));
                             }
                         });
@@ -632,6 +700,13 @@ impl GuiClientApp {
         }
     }
 
+    fn request_command_list(&self) {
+        if let Some(client) = &self.client {
+            let packet = vec![0x0c]; // Request global list
+            client.lock().unwrap().send(&packet);
+        }
+    }
+
     fn join_channel(&self, id: u32) {
         if let Some(client) = &self.client
             && let Err(e) = client.lock().unwrap().join(id)
@@ -655,6 +730,334 @@ impl GuiClientApp {
         }
     }
 
+    fn update_command_list(&mut self) {
+        if let Some(client) = &self.client {
+            let client = client.lock().unwrap();
+            let list_state = client.cmd_list.lock().unwrap();
+            self.command_list = list_state.to_vec();
+        }
+    }
+
+    fn handle_command_nav(&mut self, ctx: &egui::Context, input_id: egui::Id) -> bool {
+        if !self.show_command_suggestions || self.command_list.is_empty() {
+            return false;
+        }
+
+        // Store filter text and selection before any borrowing
+        let filter_text = self.filter_text.clone();
+        let current_selection = self.selected_suggestion;
+
+        // Calculate filtered count WITHOUT borrowing self
+        let filtered_count = self
+            .command_list
+            .iter()
+            .filter(|cmd| {
+                let name_match = cmd.name[1..]
+                    .to_lowercase()
+                    .starts_with(&filter_text.to_lowercase());
+                let alias_match = cmd.aliases.iter().any(|alias| {
+                    alias[1..]
+                        .to_lowercase()
+                        .starts_with(&filter_text.to_lowercase())
+                });
+                name_match || alias_match
+            })
+            .count();
+
+        if filtered_count == 0 {
+            return false;
+        }
+
+        let mut handled = false;
+
+        // Handle arrow down
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
+            self.selected_suggestion = (current_selection + 1) % filtered_count;
+            handled = true;
+        }
+
+        // Handle arrow up
+        if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
+            if current_selection == 0 {
+                self.selected_suggestion = filtered_count - 1;
+            } else {
+                self.selected_suggestion = current_selection - 1;
+            }
+            handled = true;
+        }
+
+        // Handle Enter key - need to get the actual command now
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && filtered_count > 0 {
+            // Get filtered commands AFTER we've updated selected_suggestion if needed
+            let filtered_commands: Vec<&ServerCommand> = self
+                .command_list
+                .iter()
+                .filter(|cmd| {
+                    let name_match = cmd.name[1..]
+                        .to_lowercase()
+                        .starts_with(&filter_text.to_lowercase());
+                    let alias_match = cmd.aliases.iter().any(|alias| {
+                        alias[1..]
+                            .to_lowercase()
+                            .starts_with(&filter_text.to_lowercase())
+                    });
+                    name_match || alias_match
+                })
+                .collect();
+
+            // Use the current selection (which might have been updated by arrow keys)
+            let selection_to_use = if handled
+                && (ctx.input(|i| i.key_pressed(egui::Key::ArrowDown))
+                    || ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)))
+            {
+                self.selected_suggestion
+            } else {
+                current_selection
+            };
+
+            if let Some(command) = filtered_commands.get(selection_to_use) {
+                let requires_auth_warning = command.requires_auth && !self.nicked;
+
+                if requires_auth_warning {
+                    self.error.show = ShowMode::ShowMaskScreen;
+                    self.error.message = "You need to set a nickname first!".to_string();
+                } else {
+                    self.input = format!("{} ", command.name);
+                }
+
+                self.show_command_suggestions = false;
+                ctx.memory_mut(|mem| mem.request_focus(input_id));
+            }
+            handled = true;
+        }
+
+        // Escape key closes suggestions
+        if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+            self.show_command_suggestions = false;
+            ctx.memory_mut(|mem| mem.request_focus(input_id));
+            handled = true;
+        }
+
+        handled
+    }
+
+    fn get_filtered_commands(&self) -> Vec<&ServerCommand> {
+        if self.filter_text.is_empty() {
+            return self.command_list.iter().collect();
+        }
+
+        self.command_list
+            .iter()
+            .filter(|cmd| {
+                let name_match = cmd.name[1..]
+                    .to_lowercase()
+                    .starts_with(&self.filter_text.to_lowercase());
+                let alias_match = cmd.aliases.iter().any(|alias| {
+                    alias[1..]
+                        .to_lowercase()
+                        .starts_with(&self.filter_text.to_lowercase())
+                });
+                name_match || alias_match
+            })
+            .collect()
+    }
+
+    fn show_command_suggestions_ui(&mut self, ui: &mut egui::Ui, input_id: egui::Id) {
+        let filtered_commands = self.get_filtered_commands();
+
+        if filtered_commands.is_empty() {
+            return;
+        }
+
+        let input_response = ui.memory(|mem| mem.data.get_temp::<egui::Response>(input_id));
+        let input_rect = input_response.map(|r| r.rect).unwrap_or_else(|| {
+            // fallback: use a default position
+            ui.min_rect()
+        });
+
+        let max_visible = 8;
+        let visible_count = filtered_commands.len().min(max_visible);
+        let suggestion_height = (visible_count as f32 * 28.0).min(200.0);
+
+        let popup_pos = egui::pos2(input_rect.min.x, input_rect.min.y - suggestion_height - 5.0);
+
+        let popup_id = egui::Id::new("command_suggestions_popup");
+
+        let mut action_to_take: Option<CommandAction> = None;
+
+        let area = egui::Area::new(popup_id)
+            .order(egui::Order::Tooltip)
+            .fixed_pos(popup_pos);
+
+        area.show(ui.ctx(), |ui| {
+            egui::Frame::popup(ui.style())
+                .inner_margin(5.0)
+                .show(ui, |ui| {
+                    ui.set_width(350.0);
+                    ui.set_max_height(suggestion_height);
+
+                    egui::ScrollArea::vertical()
+                        .max_height(suggestion_height)
+                        .show(ui, |ui| {
+                            for (i, command) in filtered_commands.iter().enumerate() {
+                                let is_selected = i == self.selected_suggestion;
+                                let requires_auth_warning = command.requires_auth && !self.nicked;
+
+                                let row_response = ui
+                                    .horizontal(|ui| {
+                                        let name_display = if requires_auth_warning {
+                                            format!("⚠ {}", command.name)
+                                        } else {
+                                            command.name.clone()
+                                        };
+
+                                        let name_color = if is_selected {
+                                            Color32::WHITE
+                                        } else if requires_auth_warning {
+                                            Color32::YELLOW
+                                        } else {
+                                            Color32::LIGHT_BLUE
+                                        };
+
+                                        ui.label(RichText::new(&name_display).color(name_color));
+
+                                        ui.add_space(ui.available_width() - 150.0);
+
+                                        let desc = if command.description.len() > 30 {
+                                            format!("{}...", &command.description[..27])
+                                        } else {
+                                            command.description.clone()
+                                        };
+
+                                        ui.label(RichText::new(desc).color(Color32::GRAY).small());
+                                    })
+                                    .response;
+
+                                if is_selected {
+                                    ui.painter().rect_filled(
+                                        row_response.rect,
+                                        2.0,
+                                        Color32::from_rgba_unmultiplied(65, 105, 225, 50),
+                                    );
+
+                                    ui.scroll_to_rect(row_response.rect, Some(egui::Align::Center));
+                                }
+
+                                if row_response.clicked() {
+                                    if requires_auth_warning {
+                                        action_to_take = Some(CommandAction::ShowNickWarning);
+                                    } else {
+                                        action_to_take =
+                                            Some(CommandAction::UseCommand(command.name.clone()));
+                                    }
+                                }
+
+                                if row_response.hovered() {
+                                    let mut tooltip = command.description.clone();
+                                    if requires_auth_warning {
+                                        tooltip =
+                                            format!("{}\n\n⚠ Requires nickname first!", tooltip);
+                                    }
+                                    if command.admin_only {
+                                        tooltip = format!("{}\n\n🛡️ Admin only", tooltip);
+                                    }
+
+                                    egui::show_tooltip_at_pointer(
+                                        ui.ctx(),
+                                        Id::new("cmd_tt"),
+                                        |ui| {
+                                            ui.label(tooltip);
+                                        },
+                                    );
+                                }
+                            }
+                        });
+                });
+        });
+
+        match action_to_take {
+            Some(CommandAction::UseCommand(cmd_name)) => {
+                self.input = format!("{} ", cmd_name);
+                self.show_command_suggestions = false;
+                ui.ctx().memory_mut(|mem| mem.request_focus(input_id));
+            }
+            Some(CommandAction::ShowNickWarning) => {
+                self.error.show = ShowMode::ShowMaskScreen;
+                self.error.message = "You need to set a nickname first!".to_string();
+                self.show_command_suggestions = false;
+            }
+            None => {}
+        }
+    }
+
+    fn tab_complete(&mut self) {
+        let filtered_commands = self.get_filtered_commands();
+
+        if filtered_commands.is_empty() {
+            return;
+        }
+
+        if filtered_commands.len() == 1 {
+            let command = filtered_commands[0];
+            self.input = format!("{} ", command.name);
+            self.show_command_suggestions = false;
+            return;
+        }
+
+        let common_prefix = self.find_common_prefix(&filtered_commands);
+        if !common_prefix.is_empty() && common_prefix != self.filter_text {
+            self.input = format!("/{}", common_prefix);
+            self.filter_text = common_prefix;
+        }
+    }
+
+    fn find_common_prefix(&self, commands: &[&ServerCommand]) -> String {
+        if commands.is_empty() {
+            return String::new();
+        }
+
+        let names: Vec<&str> = commands.iter().map(|cmd| &cmd.name[1..]).collect();
+
+        let first = names[0];
+        let mut prefix = String::new();
+
+        for (i, ch) in first.char_indices() {
+            for name in names.iter().skip(1) {
+                if i >= name.len() || name.chars().nth(i) != Some(ch) {
+                    return prefix;
+                }
+            }
+            prefix.push(ch);
+        }
+
+        prefix
+    }
+
+    fn execute_command(&mut self) {
+        if self.input.is_empty() || !self.input.starts_with('/') {
+            return;
+        }
+
+        self.show_command_suggestions = false;
+        self.selected_suggestion = 0;
+
+        let mut msg = vec![0x0d];
+        msg.extend_from_slice(self.input.as_bytes());
+
+        if let Some(socket) = &self.socket {
+            match socket.send(&msg) {
+                Ok(_) => {}
+                Err(e) => {
+                    self.write_log(format!("Failed to send: {}", e), Color32::RED);
+                }
+            }
+        } else {
+            self.write_log("Not connected".to_string(), Color32::RED);
+        }
+
+        self.input.clear();
+    }
+
     fn send_message(&mut self) {
         if self.input.is_empty() {
             return;
@@ -668,12 +1071,16 @@ impl GuiClientApp {
         let mut msg = vec![0x06];
         msg.extend_from_slice(self.input.as_bytes());
 
-        let client = match &self.client {
-            Some(client) => client.lock().unwrap(),
-            None => return,
-        };
-
-        client.send(&msg);
+        if let Some(socket) = &self.socket {
+            match socket.send(&msg) {
+                Ok(_) => {}
+                Err(e) => {
+                    self.write_log(format!("Failed to send: {}", e), Color32::RED);
+                }
+            }
+        } else {
+            self.write_log("Not connected".to_string(), Color32::RED);
+        }
 
         self.input.clear();
     }
