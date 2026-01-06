@@ -379,21 +379,6 @@ impl eframe::App for GuiClientApp {
                                             }
                                         }
 
-                                        // Unmasked users count
-                                        if channel.unmasked_count > 0 {
-                                            ui.separator();
-                                            ui.horizontal(|ui| {
-                                                ui.label(RichText::new("👻").small());
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "{} unmasked users",
-                                                        channel.unmasked_count
-                                                    ))
-                                                    .color(Color32::GRAY),
-                                                );
-                                            });
-                                        }
-
                                         if !is_current_channel {
                                             ui.button("Join").clicked().then(|| {
                                                 self.join_channel(channel.channel_id);
@@ -657,14 +642,16 @@ impl eframe::App for GuiClientApp {
 
 impl GuiClientApp {
     fn talking_indicator(&mut self, ui: &mut egui::Ui) -> egui::Response {
-        let is_talking = self
-            .client
-            .clone()
-            .unwrap()
-            .lock()
-            .unwrap()
-            .talking
-            .load(std::sync::atomic::Ordering::Relaxed);
+        let is_talking = self.client.clone();
+
+        let is_talking = match is_talking {
+            Some(a) => a
+                .lock()
+                .unwrap()
+                .talking
+                .load(std::sync::atomic::Ordering::Relaxed),
+            None => false,
+        };
 
         let response = ui.add(egui::Label::new(""));
 
