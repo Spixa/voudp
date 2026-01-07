@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
-use opus::{Bitrate, Encoder};
+use opus2::{Bitrate, Encoder};
 use symphonia::{
     core::{
         audio::{AudioBufferRef, Signal},
@@ -58,8 +58,8 @@ impl MusicClientState {
 
         let mut opus_encoder = Encoder::new(
             TARGET_SAMPLE_RATE,
-            opus::Channels::Stereo,
-            opus::Application::Audio,
+            opus2::Channels::Stereo,
+            opus2::Application::Audio,
         )?;
 
         opus_encoder.set_bitrate(Bitrate::Bits(96000))?;

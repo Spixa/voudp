@@ -4,9 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-audiopus_sys = { version = "0.2.2", features = ["bindgen"] }
-opus = "0.3.0"
-libopus_sys = { version = "0.3.0", features = ["static"] }
+opus2 = "0.3.3"
 cpal = "0.15"
 anyhow = "1"
 log = "0.4"

@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
-use opus::{Application, Channels, Decoder, Encoder};
+use opus2::{Application, Channels, Decoder, Encoder};
 use std::collections::VecDeque;
 use std::io;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -304,7 +304,7 @@ impl ClientState {
     ) {
         let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
         let mut decoder = Decoder::new(48000, Channels::Stereo).unwrap();
-        encoder.set_bitrate(opus::Bitrate::Bits(96000)).unwrap();
+        encoder.set_bitrate(opus2::Bitrate::Bits(96000)).unwrap();
 
         let mut recv_buf = [0u8; 2048];
         let mut frame_buf = vec![0.0f32; TARGET_FRAME_SIZE * 2];

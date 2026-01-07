@@ -1,5 +1,5 @@
 use log::{error, info, warn};
-use opus::{Application, Channels as OpusChannels, Decoder, Encoder};
+use opus2::{Application, Channels as OpusChannels, Decoder, Encoder};
 use ringbuf::{
     HeapRb,
     traits::{Consumer, Observer, Producer},
@@ -82,7 +82,7 @@ struct Remote {
 }
 
 impl Remote {
-    fn new(addr: SocketAddr, sample_rate: u32) -> Result<Self, opus::Error> {
+    fn new(addr: SocketAddr, sample_rate: u32) -> Result<Self, opus2::Error> {
         let encoder = Encoder::new(sample_rate, OpusChannels::Stereo, Application::Audio)?;
         let decoder = Decoder::new(sample_rate, OpusChannels::Stereo)?;
 
