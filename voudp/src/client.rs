@@ -476,19 +476,21 @@ impl ClientState {
                 }
                 "l" | "list" => {
                     let list = list.lock().unwrap();
+                    println!("Latest global list:");
                     for ch in &list.channels {
+                        println!("-> Channel {}", ch.channel_id);
                         println!(
-                            "Unmasked: {} -- Masked: {}",
+                            "\tUnmasked: {} -- Masked: {}",
                             ch.unmasked_count,
                             ch.masked_users.len()
                         );
 
                         if !ch.masked_users.is_empty() {
-                            println!("Masked list: ");
+                            println!("\tMasked list: ");
 
                             for person in ch.masked_users.iter() {
                                 println!(
-                                    "\t● {} (Muted: {}) (Deafened: {})",
+                                    "\t ● {} (Muted: {}) (Deafened: {})",
                                     person.0, person.1, person.2
                                 );
                             }
