@@ -1,3 +1,4 @@
+use chrono::Local;
 use log::{error, info, warn};
 use opus2::{Application, Channels as OpusChannels, Decoder, Encoder};
 use ringbuf::{
@@ -113,19 +114,15 @@ struct Channel {
 }
 
 impl Channel {
-    fn new(server_config: ServerConfig) -> Self {
+    fn new(server_config: ServerConfig, name: String) -> Self {
         info!("Created new channel");
         Self {
-            name: None,
+            name: Some(name),
             remotes: vec![],
             buffers: HashMap::new(),
             filter_states: HashMap::new(),
             server_config,
         }
-    }
-
-    fn name(&mut self, name: String) {
-        self.name = Some(name);
     }
 
     fn add_remote(&mut self, remote: SafeRemote) {
@@ -162,7 +159,7 @@ impl Channel {
             let mut guard = remote.lock().unwrap();
             let remote_addr = guard.addr;
 
-            if !self.buffers.contains_key(&remote_addr) {
+            if !self.buffers.contains_key(&remote_addr) || guard.status.deaf {
                 continue;
             }
 
@@ -246,10 +243,16 @@ impl ServerState {
             "There are {} free buffers (max remotes that can connect)",
             config.max_users
         );
+
+        let mut default_channels = HashMap::new();
+        default_channels.insert(1, Channel::new(config, String::from("general")));
+        default_channels.insert(2, Channel::new(config, String::from("music")));
+        default_channels.insert(3, Channel::new(config, String::from("test")));
+
         Ok(Self {
             socket: Arc::clone(&socket),
             remotes: HashMap::new(),
-            channels: HashMap::new(),
+            channels: default_channels,
             audio_rb: HeapRb::new(config.max_users),
             config,
             command_system: CommandSystem::new(),
@@ -286,6 +289,13 @@ impl ServerState {
         let chan_id = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
         info!("{} has joined the channel with id {}", addr, chan_id);
 
+        self.dm(
+            addr,
+            format!(
+                "Welcome to this server. Server time is {}",
+                Local::now().format("%d/%m/%Y %H:%M:%S")
+            ),
+        );
         let remote = self.remotes.entry(addr).or_insert_with(|| {
             info!("{} is a new remote", addr);
             Arc::new(Mutex::new(
@@ -308,11 +318,10 @@ impl ServerState {
         }
 
         // add to new channel
-        let channel = self.channels.entry(chan_id).or_insert_with(|| {
-            let mut c = Channel::new(self.config);
-            c.name(format!("channel-{}", chan_id));
-            c
-        });
+        let channel = self
+            .channels
+            .entry(chan_id)
+            .or_insert_with(|| Channel::new(self.config, format!("general-{chan_id}")));
 
         if let Some(remote) = self.remotes.get(&addr) {
             channel.add_remote(remote.clone());
@@ -368,13 +377,15 @@ impl ServerState {
 
     // TODO: announce old mask in join message incase of renicking
     fn handle_mask(&mut self, addr: SocketAddr, data: &[u8]) {
-        let (new_mask, channel_id, peer_addresses) = {
+        let (old_mask, new_mask, channel_id, peer_addresses) = {
             let Some(remote) = self.remotes.get(&addr) else {
                 warn!("Mask from unknown remote: {}, skipping request...", addr);
                 return;
             };
 
             let remote_guard = remote.lock().unwrap();
+            let old_mask = remote_guard.mask.clone();
+
             let channel_id = remote_guard.channel_id;
             let new_mask = match String::from_utf8(data.to_vec()) {
                 Ok(mask) => mask,
@@ -385,6 +396,11 @@ impl ServerState {
             };
 
             drop(remote_guard);
+
+            if new_mask.is_empty() {
+                return;
+            }
+
             remote.lock().unwrap().mask = Some(new_mask.clone());
 
             let peer_addresses: Vec<SocketAddr> =
@@ -393,13 +409,12 @@ impl ServerState {
                         .remotes
                         .iter()
                         .map(|r| r.lock().unwrap().addr)
-                        .filter(|&a| a != addr)
                         .collect()
                 } else {
                     Vec::new()
                 };
 
-            (new_mask, channel_id, peer_addresses)
+            (old_mask, new_mask, channel_id, peer_addresses)
         };
 
         info!(
@@ -408,8 +423,20 @@ impl ServerState {
         );
 
         // Broadcast to all remotes in the channel
-        let mut packet = vec![0x0a];
-        packet.extend_from_slice(new_mask.as_bytes());
+        let packet = if let Some(old) = old_mask {
+            let mut packet = vec![0x10];
+            packet.push(old.len() as u8);
+            packet.extend_from_slice(old.as_bytes());
+
+            packet.push(new_mask.len() as u8);
+            packet.extend_from_slice(new_mask.as_bytes());
+
+            packet
+        } else {
+            let mut packet = vec![0x0a];
+            packet.extend_from_slice(new_mask.as_bytes());
+            packet
+        };
 
         for peer_addr in peer_addresses {
             if let Err(e) = self.socket.send_to(&packet, peer_addr) {
@@ -428,16 +455,17 @@ impl ServerState {
         };
 
         let remote_chan_id = {
-            let remote = remote.lock().unwrap();
+            let mut remote = remote.lock().unwrap();
+            remote.last_active = Instant::now();
             remote.channel_id
         };
 
         let mut channels_info = Vec::new();
 
         for (&chan_id, chan) in &self.channels {
-            if chan.remotes.is_empty() {
-                continue;
-            }
+            // if chan.remotes.is_empty() {
+            //     continue;
+            // }
 
             let (masked_users, unmasked_count): (Vec<(String, bool, bool)>, u32) = chan
                 .remotes
@@ -459,6 +487,14 @@ impl ServerState {
                 );
 
             let mut channel_info = Vec::new();
+
+            if let Some(name) = &chan.name {
+                channel_info.push(name.len() as u8);
+                channel_info.extend_from_slice(name.as_bytes());
+            } else {
+                channel_info.extend_from_slice(&[0x0]);
+            }
+
             channel_info.extend_from_slice(&chan_id.to_be_bytes());
             channel_info.extend_from_slice(&unmasked_count.to_be_bytes());
             channel_info.extend_from_slice(&(masked_users.len() as u32).to_be_bytes());
@@ -651,6 +687,12 @@ impl ServerState {
         let _ = self.socket.send_bad_packet_notice(addr);
     }
 
+    fn dm(&self, addr: SocketAddr, msg: String) {
+        let mut packet = vec![0x11];
+        packet.extend_from_slice(msg.as_bytes());
+        let _ = self.socket.send_to(&packet, addr);
+    }
+
     fn execute_command(
         &mut self,
         input: &str,
@@ -685,6 +727,12 @@ impl ServerState {
             arguments: args,
             is_admin,
         };
+
+        match command.name.as_str() {
+            "/nick" => {}
+            "/other" => {}
+            _ => {}
+        }
 
         CommandResult::Silent
     }

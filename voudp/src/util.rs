@@ -20,6 +20,7 @@ const ACK_FLAG: u8 = 0x81;
 
 #[derive(Debug, Clone)]
 pub struct ChannelInfo {
+    pub name: String,
     pub channel_id: u32,
     pub unmasked_count: u32,
     pub masked_users: Vec<(String, bool, bool)>,
@@ -86,6 +87,11 @@ pub fn parse_global_list(bytes: &[u8]) -> Option<(Vec<ChannelInfo>, u32)> {
         if i + 12 > bytes.len() {
             return None;
         }
+        let chan_name_len = u8::from_be_bytes([bytes[i]]);
+        i += 1;
+        let name = String::from_utf8(bytes[i..i + 1 + chan_name_len as usize].to_vec()).ok()?;
+
+        i += chan_name_len as usize;
 
         let channel_id = u32::from_be_bytes(bytes[i..i + 4].try_into().ok()?);
         let unmasked_count = u32::from_be_bytes(bytes[i + 4..i + 8].try_into().ok()?);
@@ -113,11 +119,14 @@ pub fn parse_global_list(bytes: &[u8]) -> Option<(Vec<ChannelInfo>, u32)> {
         }
 
         channels.push(ChannelInfo {
+            name,
             channel_id,
             unmasked_count,
             masked_users,
         });
     }
+
+    channels.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
 
     Some((channels, current))
 }
@@ -283,18 +292,47 @@ pub fn parse_msg_packet(data: &[u8]) -> Result<(String, String), String> {
 
 pub fn parse_flow_packet(data: &[u8]) -> Option<Message> {
     match data.first() {
-        Some(byte) => {
-            let uname = &data[1..];
-            let Ok(uname) = String::from_utf8(uname.to_vec()) else {
-                return None;
-            };
+        Some(byte) => match byte {
+            0x0a => {
+                let uname = &data[1..];
+                let Ok(uname) = String::from_utf8(uname.to_vec()) else {
+                    return None;
+                };
 
-            match byte {
-                0x0a => Some(Message::JoinMessage(uname)),
-                0x0b => Some(Message::LeaveMessage(uname)),
-                _ => None,
+                Some(Message::JoinMessage(uname))
             }
-        }
+            0x0b => {
+                let uname = &data[1..];
+                let Ok(uname) = String::from_utf8(uname.to_vec()) else {
+                    return None;
+                };
+
+                Some(Message::LeaveMessage(uname))
+            }
+            0x10 => {
+                let mut i = 1;
+                let old_mask_len = u8::from_be_bytes([data[i]]);
+                i += 1;
+                let old_mask =
+                    String::from_utf8(data[i..i + old_mask_len as usize].to_vec()).ok()?;
+                i += old_mask_len as usize;
+
+                let new_mask_len = u8::from_be_bytes([data[i]]);
+                i += 1;
+                let new_mask =
+                    String::from_utf8(data[i..i + new_mask_len as usize].to_vec()).ok()?;
+                Some(Message::Renick(old_mask, new_mask))
+            }
+            0x11 => {
+                let msg = &data[1..];
+                let Ok(msg) = String::from_utf8(msg.to_vec()) else {
+                    return None;
+                };
+
+                Some(Message::Broadcast("Server".into(), msg))
+            }
+            _ => None,
+        },
         None => None,
     }
 }

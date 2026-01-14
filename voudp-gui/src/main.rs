@@ -3,25 +3,24 @@ use chrono::{DateTime, Local};
 use core::f32;
 use eframe::{NativeOptions, egui};
 use egui::{Color32, Id, RichText};
-use log::info;
+
 use std::{
-    sync::{Arc, Mutex, RwLock, mpsc::TryRecvError},
+    fs::File,
+    io::{self, Read, Write},
+    sync::{Arc, Mutex, RwLock, atomic::Ordering, mpsc::TryRecvError},
     thread::{self, JoinHandle},
     time::Instant,
 };
+
 use voudp::{
     client::{self, ClientState, GlobalListState, Message},
     util::{SecureUdpSocket, ServerCommand},
 };
 
 fn main() -> Result<()> {
-    // Initialize logging
     pretty_env_logger::init_timed();
 
-    // Run the egui application
     let options = NativeOptions {
-        // drag_and_drop_support: true,
-        // initial_window_size: Some(egui::vec2(400.0, 300.0)),
         ..Default::default()
     };
 
@@ -48,7 +47,6 @@ struct GuiClientApp {
     is_connected: bool,
     muted: bool,
     deafened: bool,
-    show_help: bool,
     client: Option<Arc<Mutex<ClientState>>>,
     client_thread: Option<JoinHandle<()>>,
     error: ErrorWindow,
@@ -59,6 +57,7 @@ struct GuiClientApp {
     show_command_suggestions: bool,
     selected_suggestion: usize,
     filter_text: String,
+    ping: u16,
 }
 
 #[derive(Default)]
@@ -82,8 +81,39 @@ struct ErrorWindow {
 
 impl Default for GuiClientApp {
     fn default() -> Self {
+        let (address, phrase, chan_id_text) = if let Ok(mut file) = File::open(".voudp") {
+            let mut data = String::new();
+            file.read_to_string(&mut data).ok();
+
+            if !data.is_empty() {
+                let split = data.split_whitespace().collect::<Vec<&str>>();
+
+                if split.len() >= 3 {
+                    (split[0].into(), split[1].into(), split[2].into())
+                } else {
+                    (
+                        "127.0.0.1:37549".to_string(),
+                        "".to_string(),
+                        "1".to_string(),
+                    )
+                }
+            } else {
+                (
+                    "127.0.0.1:37549".to_string(),
+                    "".to_string(),
+                    "1".to_string(),
+                )
+            }
+        } else {
+            (
+                "127.0.0.1:37549".to_string(),
+                "".to_string(),
+                "1".to_string(),
+            )
+        };
+
         Self {
-            address: "127.0.0.1:37549".to_string(),
+            address,
             current_channel_id: 0,
             global_list: GlobalListState {
                 channels: vec![],
@@ -92,12 +122,11 @@ impl Default for GuiClientApp {
             },
             command_list: vec![],
             socket: None,
-            chan_id_text: "1".to_string(),
-            phrase: "".to_string(),
+            chan_id_text,
+            phrase,
             is_connected: false,
             muted: false,
             deafened: false,
-            show_help: false,
             nicked: false,
             client: None,
             client_thread: None,
@@ -108,6 +137,7 @@ impl Default for GuiClientApp {
             show_command_suggestions: false,
             selected_suggestion: 0,
             filter_text: String::new(),
+            ping: u16::MAX,
         }
     }
 }
@@ -144,6 +174,7 @@ impl eframe::App for GuiClientApp {
                         if ui
                             .button(RichText::new("Use nickname").color(Color32::LIGHT_GREEN))
                             .clicked()
+                            && !self.nick.is_empty()
                         {
                             self.error.show = ShowMode::DontShow;
                             self.nicked = true;
@@ -213,22 +244,7 @@ impl eframe::App for GuiClientApp {
                                 &self.phrase.clone().into_bytes(),
                             ) {
                                 Ok(state) => {
-                                    info!("Connected to server at {}", self.address);
-
                                     self.socket = Some(state.socket.clone());
-
-                                    self.write_log(
-                                        format!(
-                                            "Connected to {} in channel #{}",
-                                            self.address, chan_id
-                                        ),
-                                        Color32::KHAKI,
-                                    );
-
-                                    self.write_log(
-                                        "You need to mask to appear for others".into(),
-                                        Color32::DARK_GREEN,
-                                    );
 
                                     let arc_state = Arc::new(Mutex::new(state));
                                     let thread_state = arc_state.clone();
@@ -246,6 +262,28 @@ impl eframe::App for GuiClientApp {
                                     self.error.message =
                                         format!("Failed to connect to the server: {}", e);
                                 }
+                            }
+                            self.request_global_list();
+
+                            let file = match File::create_new(".voudp") {
+                                Ok(file) => Some(file),
+                                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                                    File::options()
+                                        .write(true)
+                                        .truncate(true)
+                                        .open(".voudp")
+                                        .ok()
+                                }
+                                Err(_) => None,
+                            };
+
+                            if let Some(mut file) = file {
+                                let _ = writeln!(
+                                    file,
+                                    "{} {} {}",
+                                    self.address, self.phrase, self.chan_id_text
+                                );
+                                let _ = file.flush();
                             }
                         }
                     });
@@ -274,7 +312,7 @@ impl eframe::App for GuiClientApp {
                 .min_width(200.0)
                 .max_width(400.0)
                 .show(ctx, |ui| {
-                    ui.heading("🌐 Server List");
+                    ui.heading("🌐 List");
 
                     // Server summary at the top
                     let total_users = self
@@ -313,14 +351,11 @@ impl eframe::App for GuiClientApp {
                                         channel.channel_id == self.current_channel_id;
 
                                     let header = if is_current_channel {
-                                        RichText::new(format!(
-                                            "📢 Channel #{} (connected: stereo)",
-                                            channel.channel_id
-                                        ))
-                                        .color(Color32::LIGHT_GREEN)
-                                        .strong()
+                                        RichText::new(format!("📢 {}", channel.name))
+                                            .color(Color32::LIGHT_GREEN)
+                                            .strong()
                                     } else {
-                                        RichText::new(format!("🔈 Channel #{}", channel.channel_id))
+                                        RichText::new(format!("🔈 {}", channel.name))
                                             .color(Color32::LIGHT_BLUE)
                                     };
 
@@ -366,14 +401,23 @@ impl eframe::App for GuiClientApp {
                                                     );
 
                                                     // Name
-                                                    ui.label(RichText::new(name));
+                                                    ui.label(
+                                                        RichText::new(name)
+                                                            .color(Color32::GRAY)
+                                                            .strong(),
+                                                    );
 
                                                     // Status icons
                                                     if *muted {
-                                                        ui.label(RichText::new("🔇").small());
+                                                        ui.label(
+                                                            RichText::new("muted").small_raised(),
+                                                        );
                                                     }
                                                     if *deafened {
-                                                        ui.label(RichText::new("🙉").small());
+                                                        ui.label(
+                                                            RichText::new("deafened")
+                                                                .small_raised(),
+                                                        );
                                                     }
                                                 });
                                             }
@@ -398,22 +442,21 @@ impl eframe::App for GuiClientApp {
 
                             ui.add_space(10.0);
 
-                            // Refresh button
-                            if ui.button("🔄 Refresh List").clicked() {
-                                self.request_global_list();
-                            }
-
-                            // Last updated time
-                            if !self.global_list.channels.is_empty() {
-                                ui.add_space(5.0);
-                                ui.separator();
+                            if self.ping != u16::MAX {
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new("🕐").small());
-                                    ui.label(
-                                        RichText::new("Updating every second".to_string())
-                                            .color(Color32::GRAY)
-                                            .small(),
-                                    );
+                                    ui.label(RichText::new("📡").size(14.0));
+                                    ui.label("Ping: ");
+
+                                    let ping = self.ping;
+                                    let color = if ping < 125 {
+                                        Color32::LIGHT_GREEN
+                                    } else if ping < 250 {
+                                        Color32::YELLOW
+                                    } else {
+                                        Color32::RED
+                                    };
+
+                                    ui.label(RichText::new(format!("{ping}ms")).color(color));
                                 });
                             }
                         });
@@ -482,26 +525,17 @@ impl eframe::App for GuiClientApp {
                         }
                     }
 
-                    if ui.button("❓ Help").clicked() {
-                        self.show_help = !self.show_help;
+                    if ui.button("Renick").clicked() {
+                        self.error.show = ShowMode::ShowMaskScreen;
                     }
 
-                    if ui.button("🧹 Clear Logs").clicked() {
+                    if ui.button("Clear Logs").clicked() {
                         self.logs.write().unwrap().clear();
-                        self.write_log("Cleared logs".into(), Color32::WHITE);
+                        self.write_log("Cleared logs".into(), Color32::LIGHT_BLUE);
                     }
                 });
 
                 ui.separator();
-
-                if self.show_help {
-                    ui.collapsing("📝 Commands", |ui| {
-                        ui.label("- Mute/Unmute: Toggle your microphone");
-                        ui.label("- Deafen/Undeafen: Toggle your output");
-                        ui.label("- Disconnect: Leave the server");
-                    });
-                    ui.separator();
-                }
 
                 // Logs area
                 egui::ScrollArea::vertical()
@@ -615,8 +649,26 @@ impl eframe::App for GuiClientApp {
                             time,
                         ));
                     }
+                    Message::Renick(old, new) => {
+                        self.logs.write().unwrap().push((
+                            format!("{old} is now known as {new}"),
+                            Color32::YELLOW,
+                            time,
+                        ));
+                    }
                     Message::ChatMessage(name, content) => {
-                        let channel = self.current_channel_id;
+                        let channel = {
+                            let id = self.current_channel_id;
+
+                            self.global_list
+                                .channels
+                                .iter()
+                                .filter(|channel| channel.channel_id == id)
+                                .next_back()
+                                .map(|info| info.name.clone())
+                                .unwrap_or(String::from("unknown"))
+                        };
+
                         self.logs.write().unwrap().push((
                             format!("[#{channel}] {name}: {content}"),
                             Color32::WHITE,
@@ -703,17 +755,20 @@ impl GuiClientApp {
                 id, e
             );
         }
+        self.request_global_list();
     }
 
     fn update_global_list(&mut self) {
         if let Some(client) = &self.client {
             let client = client.lock().unwrap();
             let list_state = client.list.lock().unwrap();
+            let ping = client.ping.load(Ordering::Relaxed);
 
             self.global_list.channels = list_state.channels.clone();
             self.global_list.last_updated = Instant::now();
             self.global_list.current_channel = list_state.current_channel;
             self.current_channel_id = list_state.current_channel;
+            self.ping = ping;
         }
     }
 

@@ -176,7 +176,6 @@ fn init_logger() {
     pretty_env_logger::formatted_builder()
         .format(|buf, record| {
             let timestamp = Local::now().format("%Y-%m-%d %H:%M:%S");
-
             let mut style = buf.style();
             let level = match record.level() {
                 Level::Error => style.set_color(Color::Red).set_bold(true),

@@ -1,7 +1,12 @@
 use std::{
     fs::File,
-    io::Read,
+    io::{ErrorKind, Read},
     path::Path,
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicBool, AtomicU8, Ordering},
+    },
+    thread,
     time::{Duration, Instant},
 };
 
@@ -20,7 +25,10 @@ use symphonia::{
     default::{get_codecs, get_probe},
 };
 
-use crate::util::{self, SecureUdpSocket};
+use crate::{
+    client::Message,
+    util::{self, SecureUdpSocket},
+};
 
 const TARGET_SAMPLE_RATE: u32 = 48_000;
 const FRAME_SIZE: usize = 960; // 20ms at 48kHz
@@ -28,7 +36,11 @@ const FRAME_DURATION: Duration = Duration::from_millis(20);
 const CHANNELS: usize = 2; // Stereo
 
 pub struct MusicClientState {
+    first: bool,
     socket: SecureUdpSocket,
+    volume: Arc<AtomicU8>,
+    current: Arc<Mutex<String>>,
+    connected: Arc<AtomicBool>,
     channel_id: u32,
 }
 
@@ -38,23 +50,190 @@ impl MusicClientState {
         let mut socket = SecureUdpSocket::create("0.0.0.0:0".into(), key)?;
         socket.connect(addr)?;
 
-        Ok(Self { socket, channel_id })
+        Ok(Self {
+            first: true,
+            socket,
+            volume: Arc::new(AtomicU8::new(50)),
+            current: Arc::new(Mutex::new(String::from("Nothing"))),
+            connected: Arc::new(AtomicBool::new(true)),
+            channel_id,
+        })
     }
 
     pub fn run(&mut self, path: String) -> Result<()> {
-        let mut join_packet = vec![0x01];
-        join_packet.extend_from_slice(&self.channel_id.to_be_bytes());
-        self.socket.send(&join_packet)?;
+        if self.first {
+            let mut join_packet = vec![0x01];
+            join_packet.extend_from_slice(&self.channel_id.to_be_bytes());
+            self.socket.send(&join_packet)?;
+        }
 
-        println!("joined channel {}", self.channel_id);
+        self.first = false;
+        let path = Path::new(&path);
 
-        let p = Path::new(&path)
-            .file_name()
-            .and_then(|s| s.to_str())
-            .unwrap();
-        let mut nick_packet = vec![0x04];
-        nick_packet.extend_from_slice(format!("Music Bot (Playing: {})", p).as_bytes());
-        let _ = self.socket.send(&nick_packet);
+        let count = Path::new(&path)
+            .read_dir()
+            .ok()
+            .map(|dir| dir.enumerate().count())
+            .unwrap_or(0);
+
+        let single = if path.is_dir() {
+            match path.read_dir() {
+                Ok(dir) => {
+                    let volume = self.volume.clone();
+                    let sock = self.socket.clone();
+                    let conn = self.connected.clone();
+                    let current_music = self.current.clone();
+                    thread::spawn(move || {
+                        loop {
+                            if !conn.load(Ordering::Relaxed) {
+                                break;
+                            }
+
+                            let mut recv_buf = [0u8; 2048];
+                            match sock.recv_from(&mut recv_buf) {
+                                Ok((size, _)) => {
+                                    if size > 1 && recv_buf[0] == 0x06 {
+                                        match util::parse_msg_packet(&recv_buf[..size]) {
+                                            Ok((caster, cmd)) => {
+                                                if cmd.starts_with("#current") {
+                                                    let mut msg_packet = vec![0x06];
+                                                    msg_packet.extend_from_slice(
+                                                        format!(
+                                                            "{caster}, I'm currently playing {}",
+                                                            { current_music.lock().unwrap() }
+                                                        )
+                                                        .as_bytes(),
+                                                    );
+                                                    let _ = sock.send(&msg_packet);
+                                                }
+                                                if cmd.starts_with("#volume") {
+                                                    let args = cmd
+                                                        .split_whitespace()
+                                                        .collect::<Vec<&str>>();
+
+                                                    match args.get(1) {
+                                                        Some(vol_str) => {
+                                                            match vol_str.parse::<u8>() {
+                                                                Ok(vol) => {
+                                                                    let mut msg_packet = vec![0x06];
+                                                                    msg_packet.extend_from_slice(
+                                                        format!("Volume set to {vol}, {caster}")
+                                                            .as_bytes(),
+                                                    );
+                                                                    let _ = sock.send(&msg_packet);
+
+                                                                    volume.store(
+                                                                        vol,
+                                                                        Ordering::Relaxed,
+                                                                    );
+                                                                }
+                                                                Err(e) => {
+                                                                    let mut msg_packet = vec![0x06];
+                                                                    msg_packet.extend_from_slice(
+                                                        format!("Garbage volume, {caster}: {e}")
+                                                            .as_bytes(),
+                                                    );
+                                                                    let _ = sock.send(&msg_packet);
+                                                                }
+                                                            }
+                                                        }
+                                                        None => {
+                                                            let mut msg_packet = vec![0x06];
+                                                            msg_packet.extend_from_slice(format!("{caster}, use it like this: #volume <0-100>").as_bytes());
+                                                            let _ = sock.send(&msg_packet);
+                                                        }
+                                                    }
+                                                }
+                                            }
+                                            Err(e) => {
+                                                eprintln!("error: {e}");
+                                            }
+                                        }
+                                    }
+
+                                    if size > 1
+                                        && (recv_buf[0] == 0x0a || recv_buf[0] == 0x0b)
+                                        && let Some(msg) =
+                                            util::parse_flow_packet(&recv_buf[..size])
+                                    {
+                                        match msg {
+                                            Message::JoinMessage(name) => {
+                                                let mut msg_packet = vec![0x06];
+                                                msg_packet.extend_from_slice(
+                                                    format!(
+                                                        "Why hello there, {name}. I'm playing {}",
+                                                        { current_music.lock().unwrap() }
+                                                    )
+                                                    .as_bytes(),
+                                                );
+                                                let _ = sock.send(&msg_packet);
+                                            }
+                                            Message::Renick(_, _) => {}
+                                            _ => {}
+                                        }
+                                    }
+                                }
+                                Err(e) if e.0.kind() == ErrorKind::WouldBlock => {
+                                    thread::sleep(Duration::from_micros(100));
+                                }
+                                Err(_) => {}
+                            }
+                            thread::sleep(Duration::from_micros(1000));
+                        }
+                    });
+
+                    for (num, entry) in dir.enumerate() {
+                        match entry {
+                            Ok(entry) => {
+                                if entry.file_type().unwrap().is_file() {
+                                    let p = entry.file_name().to_str().unwrap().to_string();
+                                    let mut nick_packet = vec![0x04];
+                                    nick_packet.extend_from_slice(
+                                        format!("Music ({}/{count})", num + 1).as_bytes(),
+                                    );
+
+                                    *self.current.lock().unwrap() = p.clone();
+                                    let _ = self.socket.send(&nick_packet);
+
+                                    let mut msg_packet = vec![0x06];
+                                    msg_packet.extend_from_slice(
+                                        format!("Now playing the hit song {}", p).as_bytes(),
+                                    );
+                                    let _ = self.socket.send(&msg_packet)?;
+
+                                    match self.run(entry.path().to_str().unwrap().to_string()) {
+                                        Ok(_) => {}
+                                        Err(e) => {
+                                            println!("Ran into an error: {e}, skipping this track");
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                println!("ran into an error with an entry, skipping due to {e}");
+                            }
+                        }
+                    }
+                }
+                Err(e) => {
+                    eprintln!("error when opening directory: {e}");
+                }
+            }
+            println!("Goodbye!");
+            self.connected.store(false, Ordering::Relaxed);
+            return Ok(());
+        } else {
+            true
+        };
+
+        if single {
+            println!("(re)joined channel {}", self.channel_id);
+
+            let mut deaf_packet = vec![0x08];
+            let mode = 0x01;
+            deaf_packet.extend_from_slice(&[mode]);
+            self.socket.send(&deaf_packet)?;
+        }
 
         let mut opus_encoder = Encoder::new(
             TARGET_SAMPLE_RATE,
@@ -77,6 +256,7 @@ impl MusicClientState {
         let decode_opts = DecoderOptions::default();
 
         let probed = get_probe().format(&hint, mss, &format_opts, &metadata_opts)?;
+
         let mut format = probed.format;
         let track = format
             .tracks()
@@ -101,12 +281,23 @@ impl MusicClientState {
             }
 
             // holy hell it was a pain to figure all of them out except the first one maybe
+            let vol = 0.01 * self.volume.load(Ordering::Relaxed) as f32;
             match decoder.decode(&packet)? {
-                AudioBufferRef::F32(buf) => process_buffer_f32(&buf, &mut sample_buf, sample_rate)?,
-                AudioBufferRef::S16(buf) => process_buffer_i16(&buf, &mut sample_buf, sample_rate)?,
-                AudioBufferRef::S24(buf) => process_buffer_i24(&buf, &mut sample_buf, sample_rate)?,
-                AudioBufferRef::S32(buf) => process_buffer_i32(&buf, &mut sample_buf, sample_rate)?,
-                AudioBufferRef::U8(buf) => process_buffer_u8(&buf, &mut sample_buf, sample_rate)?,
+                AudioBufferRef::F32(buf) => {
+                    process_buffer_f32(vol, &buf, &mut sample_buf, sample_rate)?
+                }
+                AudioBufferRef::S16(buf) => {
+                    process_buffer_i16(vol, &buf, &mut sample_buf, sample_rate)?
+                }
+                AudioBufferRef::S24(buf) => {
+                    process_buffer_i24(vol, &buf, &mut sample_buf, sample_rate)?
+                }
+                AudioBufferRef::S32(buf) => {
+                    process_buffer_i32(vol, &buf, &mut sample_buf, sample_rate)?
+                }
+                AudioBufferRef::U8(buf) => {
+                    process_buffer_u8(vol, &buf, &mut sample_buf, sample_rate)?
+                }
                 _ => return Err(anyhow!("unsupported audio buffer type")),
             }
 
@@ -130,7 +321,6 @@ impl MusicClientState {
 
                 // remove the samples we read:
                 sample_buf.drain(0..FRAME_SIZE * CHANNELS);
-
                 // timing logic:
                 let now = Instant::now();
                 if now < target_time {
@@ -167,6 +357,7 @@ impl MusicClientState {
 
 // no conversion needed as we deal with f32 ourselves
 fn process_buffer_f32(
+    vol: f32,
     buffer: &symphonia::core::audio::AudioBuffer<f32>,
     sample_buffer: &mut Vec<f32>,
     original_sample_rate: u32,
@@ -182,10 +373,17 @@ fn process_buffer_f32(
         }
     }
 
-    process_interleaved(&interleaved, channels, original_sample_rate, sample_buffer)
+    process_interleaved(
+        vol,
+        &interleaved,
+        channels,
+        original_sample_rate,
+        sample_buffer,
+    )
 }
 
 fn process_buffer_i16(
+    vol: f32,
     buffer: &symphonia::core::audio::AudioBuffer<i16>,
     sample_buffer: &mut Vec<f32>,
     original_sample_rate: u32,
@@ -202,11 +400,18 @@ fn process_buffer_i16(
         }
     }
 
-    process_interleaved(&interleaved, channels, original_sample_rate, sample_buffer)
+    process_interleaved(
+        vol,
+        &interleaved,
+        channels,
+        original_sample_rate,
+        sample_buffer,
+    )
 }
 
 // Process i24 buffer
 fn process_buffer_i24(
+    vol: f32,
     buffer: &symphonia::core::audio::AudioBuffer<i24>,
     sample_buffer: &mut Vec<f32>,
     original_sample_rate: u32,
@@ -223,11 +428,18 @@ fn process_buffer_i24(
         }
     }
 
-    process_interleaved(&interleaved, channels, original_sample_rate, sample_buffer)
+    process_interleaved(
+        vol,
+        &interleaved,
+        channels,
+        original_sample_rate,
+        sample_buffer,
+    )
 }
 
 // Process i32 buffer
 fn process_buffer_i32(
+    vol: f32,
     buffer: &symphonia::core::audio::AudioBuffer<i32>,
     sample_buffer: &mut Vec<f32>,
     original_sample_rate: u32,
@@ -244,11 +456,18 @@ fn process_buffer_i32(
         }
     }
 
-    process_interleaved(&interleaved, channels, original_sample_rate, sample_buffer)
+    process_interleaved(
+        vol,
+        &interleaved,
+        channels,
+        original_sample_rate,
+        sample_buffer,
+    )
 }
 
 // Process u8 buffer
 fn process_buffer_u8(
+    vol: f32,
     buffer: &symphonia::core::audio::AudioBuffer<u8>,
     sample_buffer: &mut Vec<f32>,
     original_sample_rate: u32,
@@ -265,10 +484,17 @@ fn process_buffer_u8(
         }
     }
 
-    process_interleaved(&interleaved, channels, original_sample_rate, sample_buffer)
+    process_interleaved(
+        vol,
+        &interleaved,
+        channels,
+        original_sample_rate,
+        sample_buffer,
+    )
 }
 
 fn process_interleaved(
+    vol: f32,
     interleaved: &[f32],
     channels: usize,
     original_sample_rate: u32,
@@ -276,10 +502,10 @@ fn process_interleaved(
 ) -> Result<()> {
     // resample if necessary
     let resampled = if original_sample_rate != TARGET_SAMPLE_RATE {
-        println!(
-            "sample rate mismatch. resampling... [{} -> {}]",
-            original_sample_rate, TARGET_SAMPLE_RATE
-        );
+        // println!(
+        //     "sample rate mismatch. resampling... [{} -> {}]",
+        //     original_sample_rate, TARGET_SAMPLE_RATE
+        // );
         resample(
             interleaved,
             original_sample_rate,
@@ -291,7 +517,7 @@ fn process_interleaved(
         interleaved.to_vec()
     };
 
-    let final_samples = if channels == 1 {
+    let mut final_samples = if channels == 1 {
         let mut stereo = Vec::with_capacity(resampled.len() * 2);
         for sample in &resampled {
             // mono audio pair for stereo channels
@@ -304,6 +530,11 @@ fn process_interleaved(
     } else {
         return Err(anyhow!("unsupported number of channels: {}", channels));
     };
+
+    for sample in &mut final_samples {
+        *sample *= vol;
+        *sample = sample.clamp(-1.0, 1.0);
+    }
 
     sample_buffer.extend(final_samples);
     Ok(())

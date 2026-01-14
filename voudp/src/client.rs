@@ -4,7 +4,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use opus2::{Application, Channels, Decoder, Encoder};
 use std::collections::VecDeque;
 use std::io;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
@@ -33,6 +33,7 @@ pub struct ClientState {
     channel_id: Arc<Mutex<u32>>,
     pub list: SafeChannelList,
     pub talking: Arc<AtomicBool>,
+    pub ping: Arc<AtomicU16>,
     pub rx: Option<Receiver<OwnedMessage>>,
     pub state: Arc<Mutex<State>>,
     pub cmd_list: SafeCommandList,
@@ -44,6 +45,7 @@ pub enum Message {
     JoinMessage(String),
     LeaveMessage(String),
     ChatMessage(String, String),
+    Renick(String, String),
     Broadcast(String, String),
 }
 
@@ -74,6 +76,7 @@ impl ClientState {
                 last_updated: Instant::now(),
                 current_channel: 0,
             })),
+            ping: Arc::new(AtomicU16::new(u16::MAX)),
             talking: Arc::new(AtomicBool::new(false)),
             rx: None,
             state: Arc::new(Mutex::new(State::Fine)),
@@ -101,6 +104,7 @@ impl ClientState {
         let state = self.state.clone();
         let talking = self.talking.clone();
         let (tx, rx) = mpsc::channel::<OwnedMessage>();
+        let ping = self.ping.clone();
 
         self.rx = Some(rx);
         let id = { self.channel_id.lock().unwrap() };
@@ -109,6 +113,7 @@ impl ClientState {
                 self.join(*id)?;
                 Self::start_audio(
                     socket, muted, deafened, connected, state, list, cmd_list, tx, mode, talking,
+                    ping,
                 )?;
             }
             Mode::Gui => {
@@ -124,7 +129,7 @@ impl ClientState {
                     }
                     if let Err(e) = Self::start_audio(
                         socket, muted, deafened, connected, state, list, cmd_list, tx, mode,
-                        talking,
+                        talking, ping,
                     ) {
                         eprintln!("audio thread error: {e:?}");
                     }
@@ -147,6 +152,7 @@ impl ClientState {
         tx: Sender<OwnedMessage>,
         mode: Mode,
         talking: Arc<AtomicBool>,
+        ping: Arc<AtomicU16>,
     ) -> Result<()> {
         let muted_clone = muted.clone();
         let deafened_clone = deafened.clone();
@@ -164,9 +170,11 @@ impl ClientState {
             let input_clone = Arc::clone(&input_buffer);
             let output_clone = Arc::clone(&output_buffer);
             let connected_clone = Arc::clone(&connected);
+            let muted_clone = Arc::clone(&muted);
             let state_clone = Arc::clone(&state);
             let list = list.clone();
             let cmd_list = cmd_list.clone();
+            let ping = ping.clone();
             thread::spawn(move || {
                 Self::network_thread(
                     socket,
@@ -177,6 +185,8 @@ impl ClientState {
                     connected_clone,
                     state_clone,
                     cmd_list,
+                    muted_clone,
+                    ping,
                 )
             });
         }
@@ -301,6 +311,8 @@ impl ClientState {
         connected: Arc<AtomicBool>,
         state: Arc<Mutex<State>>,
         cmd_list: SafeCommandList,
+        muted: Arc<AtomicBool>,
+        ping: Arc<AtomicU16>,
     ) {
         let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
         let mut decoder = Decoder::new(48000, Channels::Stereo).unwrap();
@@ -310,6 +322,7 @@ impl ClientState {
         let mut frame_buf = vec![0.0f32; TARGET_FRAME_SIZE * 2];
 
         let mut test = Instant::now();
+        let mut ping_reply = Instant::now();
         loop {
             if !connected.load(Ordering::Relaxed) {
                 break;
@@ -322,10 +335,12 @@ impl ClientState {
                 socket.send(&list_packet).unwrap();
                 socket.send(&cmd_list_packet).unwrap();
                 test = Instant::now();
+                ping_reply = Instant::now();
             }
 
             {
                 let mut buffer = input.lock().unwrap();
+                let muted = muted.load(Ordering::Relaxed);
                 while buffer.len() >= TARGET_FRAME_SIZE * 2 {
                     for i in 0..TARGET_FRAME_SIZE {
                         frame_buf[i * 2] = buffer.pop_front().unwrap_or(0.0);
@@ -339,7 +354,7 @@ impl ClientState {
                     }
 
                     let mut opus_data = vec![0u8; 400];
-                    if let Ok(len) = encoder.encode_float(&frame_buf, &mut opus_data) {
+                    if !muted && let Ok(len) = encoder.encode_float(&frame_buf, &mut opus_data) {
                         let mut packet = vec![0x02];
                         packet.extend_from_slice(&opus_data[..len]);
                         let _ = socket.send(&packet);
@@ -375,6 +390,11 @@ impl ClientState {
                         list.channels = parsed.0;
                         list.current_channel = parsed.1;
                         list.last_updated = Instant::now();
+
+                        ping.store(
+                            Instant::now().duration_since(ping_reply).as_millis() as u16,
+                            Ordering::Relaxed,
+                        );
                     }
                 }
                 Ok((size, _)) if size > 1 && recv_buf[0] == 0x06 => {
@@ -387,7 +407,13 @@ impl ClientState {
                         }
                     }
                 }
-                Ok((size, _)) if size > 1 && (recv_buf[0] == 0x0a || recv_buf[0] == 0x0b) => {
+                Ok((size, _))
+                    if size > 1
+                        && (recv_buf[0] == 0x0a
+                            || recv_buf[0] == 0x0b
+                            || recv_buf[0] == 0x10
+                            || recv_buf[0] == 0x11) =>
+                {
                     if let Some(msg) = util::parse_flow_packet(&recv_buf[..size]) {
                         let _ = tx.send((msg, Local::now()));
                     }
