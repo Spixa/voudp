@@ -392,7 +392,6 @@ impl SecureUdpSocket {
     pub fn create(bind_addr: String, key: Key) -> io::Result<SecureUdpSocket> {
         let socket = UdpSocket::bind(bind_addr)?;
         socket.set_nonblocking(true)?;
-
         let cipher = ChaCha20Poly1305::new(&key);
 
         Ok(Self {
@@ -401,6 +400,10 @@ impl SecureUdpSocket {
             cipher,
             seq_counter: AtomicU32::new(1),
         })
+    }
+
+    pub fn local_addr(&self) -> SocketAddr {
+        self.socket.local_addr().unwrap()
     }
 
     pub fn connect<A: ToSocketAddrs>(&mut self, addr: A) -> io::Result<()> {

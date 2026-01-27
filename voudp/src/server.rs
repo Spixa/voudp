@@ -283,7 +283,7 @@ impl ServerState {
         match data[0] {
             0x0d => self.handle_console_command(addr, &data[1..]),
             0x03 => self.handle_console_eof(addr),
-            0x04 => { /* keep alive */ }
+            0x04 => {}
             _ => error!(
                 "Console {addr} sent an invalid packet (starts with {:#?}",
                 data[0]
@@ -293,11 +293,20 @@ impl ServerState {
 
     fn handle_console_command(&mut self, addr: SocketAddr, data: &[u8]) {
         if let Ok(req) = String::from_utf8(data.to_vec()) {
-            let reply = if req.starts_with("help") {
-                String::from("No available commands")
+            let parts: Vec<&str> = req.split_whitespace().collect();
+
+            let reply = if !parts.is_empty() {
+                let cmd = parts[0];
+
+                match cmd {
+                    "help" => "you are connected to a voudp 0.1 server",
+                    "ping" => "pong",
+                    _ => "unknown command. read the manual on executing remote commands",
+                }
             } else {
-                String::from("Unknown command")
-            };
+                "Empty message"
+            }
+            .to_string();
 
             if let Err(e) = self.socket.send_to(reply.as_bytes(), addr) {
                 warn!("Could not reply back to console {addr} due to {e}");

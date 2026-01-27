@@ -5,6 +5,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use chrono::Local;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{self, Event, KeyCode, KeyModifiers},
@@ -59,7 +60,18 @@ fn render(console: &Console) -> std::io::Result<()> {
 
         // UTF-8 safe truncation
         let trunc: String = line.chars().take(w as usize).collect();
+
+        let color = if trunc.starts_with("server") {
+            Color::Grey
+        } else if trunc.starts_with("Executing") {
+            Color::DarkGrey
+        } else {
+            Color::Green
+        };
+
+        execute!(out, SetForegroundColor(color))?;
         write!(out, "{trunc}")?;
+        execute!(out, ResetColor)?;
     }
 
     // render input on bottom line (never wraps)
@@ -75,9 +87,34 @@ fn render(console: &Console) -> std::io::Result<()> {
 }
 
 fn main() -> Result<(), std::io::Error> {
-    let ip = util::ask("Enter address: ");
-    let phrase = util::ask("Enter phrase: ");
-    let password = util::ask("Enter console password: ");
+    let ip: String = {
+        let input = util::ask("Enter address (default 127.0.0.1:37549): ");
+        if input.trim().is_empty() {
+            "127.0.0.1:37549".to_string()
+        } else {
+            input
+        }
+    };
+
+    let phrase: String = {
+        let input = util::ask("Enter phrase (default voudp): ");
+        if input.trim().is_empty() {
+            "voudp".to_string()
+        } else {
+            input
+        }
+    };
+
+    let password: String = {
+        let input = util::ask("Enter console password (default `password`): ");
+        if input.trim().is_empty() {
+            "password".to_string()
+        } else {
+            input
+        }
+    };
+
+    println!("Generating key...");
 
     let key = util::derive_key_from_phrase(phrase.as_bytes(), VOUDP_SALT);
     let socket = SecureUdpSocket::create("0.0.0.0:0".to_owned(), key)?;
@@ -127,10 +164,7 @@ fn main() -> Result<(), std::io::Error> {
                                 if tx.send(LogMsg::Line(string)).is_err() {
                                     break;
                                 }
-                            } else if tx
-                                .send(LogMsg::Line("Server sent a bad string".into()))
-                                .is_err()
-                            {
+                            } else if tx.send(LogMsg::Line("CORRUPTED MESSAGE".into())).is_err() {
                                 break;
                             }
                         }
@@ -139,7 +173,7 @@ fn main() -> Result<(), std::io::Error> {
                         thread::sleep(Duration::from_millis(50));
                     }
                     Err(e) => {
-                        let _ = tx.send(LogMsg::Line(format!("Socket error: {}", e.0)));
+                        let _ = tx.send(LogMsg::Line(format!("SOCKET ERROR: {}", e.0)));
                         let _ = tx.send(LogMsg::Shutdown);
                         break;
                     }
@@ -160,12 +194,16 @@ fn main() -> Result<(), std::io::Error> {
         // drain logs from recv thread
         while let Ok(msg) = rx.try_recv() {
             match msg {
-                LogMsg::Line(line) => console.push_log(line),
+                LogMsg::Line(line) => console.push_log(format!(
+                    "server [{server_addr}] <-> [{}] {} recv: {line}",
+                    socket.local_addr(),
+                    Local::now().format("%H:%M:%S")
+                )),
                 LogMsg::Shutdown => running = false,
             }
         }
 
-        if timer.duration_since(Instant::now()) >= Duration::from_secs(1) {
+        if timer.elapsed() >= Duration::from_secs(1) {
             let _ = socket.send_to(&[0x04], server_addr);
             timer = Instant::now();
         }
@@ -219,6 +257,8 @@ fn main() -> Result<(), std::io::Error> {
         Clear(ClearType::All),
         MoveTo(0, 0)
     )?;
+
+    stdout().flush()?;
 
     Ok(())
 }
