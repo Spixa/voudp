@@ -1,0 +1,9 @@
+[package]
+name = "voudp-console"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+voudp = { path = "../voudp" }
+crossterm = "0.27"
+ctrlc = "3.2"

@@ -16,7 +16,10 @@ use std::{
 use crate::{
     commands::CommandSystem,
     mixer,
-    util::{self, CommandCategory, CommandContext, CommandResult, ControlRequest, SecureUdpSocket},
+    util::{
+        self, CommandCategory, CommandContext, CommandResult, ControlRequest, PASSWORD,
+        SecureUdpSocket,
+    },
 };
 const JITTER_BUFFER_LEN: usize = 50;
 
@@ -104,7 +107,22 @@ impl Remote {
     }
 }
 
+struct Console {
+    _addr: SocketAddr,
+    last_active: Instant,
+}
+
+impl Console {
+    fn new(_addr: SocketAddr) -> Self {
+        Self {
+            _addr,
+            last_active: Instant::now(),
+        }
+    }
+}
+
 type SafeRemote = Arc<Mutex<Remote>>;
+type SafeConsole = Arc<Mutex<Console>>;
 struct Channel {
     name: Option<String>,
     remotes: Vec<SafeRemote>,
@@ -225,6 +243,7 @@ impl Channel {
 pub struct ServerState {
     socket: Arc<SecureUdpSocket>,
     remotes: HashMap<SocketAddr, SafeRemote>,
+    consoles: HashMap<SocketAddr, SafeConsole>,
     channels: HashMap<u32, Channel>,
     audio_rb: HeapRb<(SocketAddr, Vec<u8>)>,
     config: ServerConfig,
@@ -252,6 +271,7 @@ impl ServerState {
         Ok(Self {
             socket: Arc::clone(&socket),
             remotes: HashMap::new(),
+            consoles: HashMap::new(),
             channels: default_channels,
             audio_rb: HeapRb::new(config.max_users),
             config,
@@ -259,8 +279,51 @@ impl ServerState {
         })
     }
 
+    fn handle_console(&mut self, addr: SocketAddr, data: &[u8]) {
+        match data[0] {
+            0x0d => self.handle_console_command(addr, &data[1..]),
+            0x03 => self.handle_console_eof(addr),
+            0x04 => { /* keep alive */ }
+            _ => error!(
+                "Console {addr} sent an invalid packet (starts with {:#?}",
+                data[0]
+            ),
+        }
+    }
+
+    fn handle_console_command(&mut self, addr: SocketAddr, data: &[u8]) {
+        if let Ok(req) = String::from_utf8(data.to_vec()) {
+            let reply = if req.starts_with("help") {
+                String::from("No available commands")
+            } else {
+                String::from("Unknown command")
+            };
+
+            if let Err(e) = self.socket.send_to(reply.as_bytes(), addr) {
+                warn!("Could not reply back to console {addr} due to {e}");
+            }
+        } else {
+            warn!("Received bad command from {addr}");
+        }
+    }
+
+    fn handle_console_eof(&mut self, addr: SocketAddr) {
+        self.consoles.retain(|addr_got, _| {
+            if *addr_got == addr {
+                info!("Console {addr} left the server");
+                return false;
+            }
+            true
+        });
+    }
+
     fn handle_packet(&mut self, addr: SocketAddr, data: &[u8]) {
         if data.is_empty() {
+            return;
+        }
+
+        if self.consoles.contains_key(&addr) {
+            self.handle_console(addr, data);
             return;
         }
 
@@ -274,10 +337,26 @@ impl ServerState {
             0x08 => self.handle_ctrl(addr, &data[1..]),
             0x0c => self.handle_sync_commands(addr),
             0x0d => self.handle_cmd(addr, &data[1..]),
+            0xff => self.register_console(addr, &data[1..]),
             _ => error!(
                 "{} sent an invalid packet (starts with {:#?})",
                 addr, data[0]
             ),
+        }
+    }
+
+    fn register_console(&mut self, addr: SocketAddr, data: &[u8]) {
+        if let Ok(password) = String::from_utf8(data.to_vec()) {
+            if password.eq(PASSWORD) {
+                info!("Registered {addr} as a new console. Capabilties: cmd");
+                self.consoles
+                    .insert(addr, Arc::new(Mutex::new(Console::new(addr))));
+            } else {
+                info!("{addr} tried to log-in with the incorrect password");
+                self.handle_bad(addr);
+            }
+        } else {
+            warn!("{addr} sent a bad packet when wanting to register itself as a console")
         }
     }
 
@@ -287,6 +366,12 @@ impl ServerState {
         }
 
         let chan_id = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+
+        if chan_id == 0 && chan_id >= u16::MAX as u32 {
+            warn!("{addr} tried to join channel with id {chan_id}, but that id is invalid");
+            return;
+        }
+
         info!("{} has joined the channel with id {}", addr, chan_id);
 
         self.dm(
@@ -782,6 +867,19 @@ impl ServerState {
 
     fn cleanup(&mut self) {
         let now = Instant::now();
+
+        self.consoles.retain(|addr, guard| {
+            let console = guard.lock().unwrap();
+
+            if console.last_active.duration_since(now)
+                > Duration::from_secs(self.config.timeout_secs)
+            {
+                info!("Dropped console {addr} due to timeout");
+                false
+            } else {
+                true
+            }
+        });
 
         self.remotes.retain(|addr, remote| {
             let last_active = { remote.lock().unwrap().last_active };

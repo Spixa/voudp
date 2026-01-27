@@ -13,6 +13,7 @@ use sha2::Sha256;
 use crate::client::Message;
 
 pub const VOUDP_SALT: &[u8; 5] = b"voudp";
+pub const PASSWORD: &str = "password";
 
 // internal flags for packet processing:
 const RELIABLE_FLAG: u8 = 0x80;

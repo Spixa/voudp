@@ -2,6 +2,7 @@
 members = [
     "voudp",
     "voudp-cli",
-    "voudp-gui"
+    "voudp-gui",
+    "voudp-console"
 ]
 resolver = "2"

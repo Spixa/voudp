@@ -504,7 +504,7 @@ impl ClientState {
                     let list = list.lock().unwrap();
                     println!("Latest global list:");
                     for ch in &list.channels {
-                        println!("-> Channel {}", ch.channel_id);
+                        println!("#{}: ", ch.name);
                         println!(
                             "\tUnmasked: {} -- Masked: {}",
                             ch.unmasked_count,
