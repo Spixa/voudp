@@ -125,6 +125,7 @@ type SafeRemote = Arc<Mutex<Remote>>;
 type SafeConsole = Arc<Mutex<Console>>;
 struct Channel {
     name: Option<String>,
+    _id: u32,
     remotes: Vec<SafeRemote>,
     buffers: HashMap<SocketAddr, Vec<f32>>,
     filter_states: HashMap<SocketAddr, (f32, f32)>,
@@ -132,10 +133,11 @@ struct Channel {
 }
 
 impl Channel {
-    fn new(server_config: ServerConfig, name: String) -> Self {
-        info!("Created new channel");
+    fn new(server_config: ServerConfig, name: String, _id: u32) -> Self {
+        info!("Created new channel with {_id}");
         Self {
             name: Some(name),
+            _id,
             remotes: vec![],
             buffers: HashMap::new(),
             filter_states: HashMap::new(),
@@ -264,9 +266,9 @@ impl ServerState {
         );
 
         let mut default_channels = HashMap::new();
-        default_channels.insert(1, Channel::new(config, String::from("general")));
-        default_channels.insert(2, Channel::new(config, String::from("music")));
-        default_channels.insert(3, Channel::new(config, String::from("test")));
+        default_channels.insert(1, Channel::new(config, String::from("general"), 1));
+        default_channels.insert(2, Channel::new(config, String::from("music"), 2));
+        default_channels.insert(3, Channel::new(config, String::from("test"), 3));
 
         Ok(Self {
             socket: Arc::clone(&socket),
@@ -295,18 +297,129 @@ impl ServerState {
         if let Ok(req) = String::from_utf8(data.to_vec()) {
             let parts: Vec<&str> = req.split_whitespace().collect();
 
-            let reply = if !parts.is_empty() {
+            let reply: String = if !parts.is_empty() {
                 let cmd = parts[0];
 
                 match cmd {
-                    "help" => "you are connected to a voudp 0.1 server",
-                    "ping" => "pong",
-                    _ => "unknown command. read the manual on executing remote commands",
+                    "help" => "you are connected to a voudp 0.1 server".into(),
+                    "ping" => "pong".into(),
+                    "list" => {
+                        format!("global list cannot be displayed with crossterm")
+                    }
+                    "rename" => {
+                        if parts.len() < 3 {
+                            "usage: rename <channel> <new-name>".to_string()
+                        } else {
+                            let ident = parts[1];
+                            let new_name = parts[2..].join(" ");
+
+                            let channel_opt = self
+                                .channels
+                                .iter_mut()
+                                .find(|(_, c)| c.name.as_deref() == Some(ident));
+
+                            match channel_opt {
+                                Some((_key, channel)) => {
+                                    let old_name = channel
+                                        .name
+                                        .replace(new_name.clone())
+                                        .unwrap_or("unnamed".into());
+
+                                    info!("Channel '{}' renamed to '{}'", old_name, new_name);
+
+                                    format!("renamed channel '{}' -> '{}'", old_name, new_name)
+                                }
+                                None => format!("channel '{}' not found", ident),
+                            }
+                        }
+                    }
+                    "chans" => {
+                        let s = self
+                            .channels
+                            .iter()
+                            .map(|(id, channel)| {
+                                format!(
+                                    "{} ({})",
+                                    channel.name.clone().unwrap_or_else(|| "unnamed".into()),
+                                    id
+                                )
+                            })
+                            .collect::<Vec<_>>()
+                            .join(", ");
+                        s
+                    }
+                    "create" => {
+                        if parts.len() < 2 {
+                            "usage: create <channel_name>".into()
+                        } else {
+                            let name = parts[1..].join(" ");
+
+                            let new_id = self.channels.keys().max().map_or(1, |id| id + 1);
+                            self.channels
+                                .insert(new_id, Channel::new(self.config, name.clone(), new_id));
+                            format!(
+                                "created channel '{}' with id {} ({}kHz) ",
+                                name,
+                                new_id,
+                                self.config.sample_rate as f64 / 1000.0
+                            )
+                        }
+                    }
+                    "del" => {
+                        if parts.len() < 2 {
+                            "usage: del <channel_id|channel_name>".into()
+                        } else {
+                            let target = parts[1];
+                            let maybe_channel_id = target.parse::<u32>().ok();
+
+                            let channel_id_to_delete = if let Some(id) = maybe_channel_id {
+                                if id == 1 { None } else { Some(id) }
+                            } else {
+                                // search by name
+                                self.channels
+                                    .iter()
+                                    .find(|(_, c)| c.name.as_deref() == Some(target))
+                                    .map(|(id, _)| *id)
+                            };
+
+                            if let Some(channel_id) = channel_id_to_delete {
+                                if channel_id == 1 {
+                                    "cannot delete the default channel defined by the voudp protocol".into()
+                                } else if let Some(channel) = self.channels.remove(&channel_id) {
+                                    // if let Some(default_channel) = self.channels.get_mut(&1) {
+                                    //     default_channel
+                                    //         .remotes
+                                    //         .extend(channel.remotes.iter().cloned());
+                                    // }
+
+                                    // notify users
+                                    channel.remotes.iter().for_each(|r| {
+                                        let addr = r.lock().unwrap().addr;
+                                        self.dm(
+                                            addr,
+                                            "The channel you were in was deleted. Move to a new one".to_owned(),
+                                        );
+                                    });
+
+                                    format!(
+                                        "deleted channel '{}' (id {}) and moved users to default",
+                                        channel.name.unwrap_or_else(|| "unknown".into()),
+                                        channel_id
+                                    )
+                                } else {
+                                    "channel not found".into()
+                                }
+                            } else {
+                                "channel not found".into()
+                            }
+                        }
+                    }
+
+                    _ => "unknown command. read the manual on executing remote commands".into(),
                 }
             } else {
-                "Empty message"
-            }
-            .to_string();
+                "server received your empty message".into()
+            };
 
             if let Err(e) = self.socket.send_to(reply.as_bytes(), addr) {
                 warn!("Could not reply back to console {addr} due to {e}");
@@ -415,7 +528,7 @@ impl ServerState {
         let channel = self
             .channels
             .entry(chan_id)
-            .or_insert_with(|| Channel::new(self.config, format!("general-{chan_id}")));
+            .or_insert_with(|| Channel::new(self.config, format!("general-{chan_id}"), chan_id));
 
         if let Some(remote) = self.remotes.get(&addr) {
             channel.add_remote(remote.clone());

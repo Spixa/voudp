@@ -5,7 +5,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use chrono::Local;
 use crossterm::{
     cursor::{Hide, MoveTo, Show},
     event::{self, Event, KeyCode, KeyModifiers},
@@ -61,8 +60,9 @@ fn render(console: &Console) -> std::io::Result<()> {
         // UTF-8 safe truncation
         let trunc: String = line.chars().take(w as usize).collect();
 
-        let color = if trunc.starts_with("server") {
-            Color::Grey
+        // decoded voudp-aux packet:
+        let color = if trunc.starts_with("voudp-aux") {
+            Color::White
         } else if trunc.starts_with("Executing") {
             Color::DarkGrey
         } else {
@@ -195,9 +195,8 @@ fn main() -> Result<(), std::io::Error> {
         while let Ok(msg) = rx.try_recv() {
             match msg {
                 LogMsg::Line(line) => console.push_log(format!(
-                    "server [{server_addr}] <-> [{}] {} recv: {line}",
+                    "voudp-aux [{server_addr}] <-> [{}] recv: {line}",
                     socket.local_addr(),
-                    Local::now().format("%H:%M:%S")
                 )),
                 LogMsg::Shutdown => running = false,
             }
