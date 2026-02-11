@@ -1,2 +1,0 @@
-# voudp
-voice over UDP

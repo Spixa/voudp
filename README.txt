@@ -1,4 +1,6 @@
-Here is going to be a shortened version of the specification of VoUDP:
+** VoUDP Specification **
+
+Here is going to be a shortened version of the specification of VoUDP for future reference:
 Note: all u32 are BIG ENDIAN. () represents a byte for reference. ... means variable in size. {} means repeated per client
 
 Join packet:
@@ -35,11 +37,47 @@ Control packet:
     C2S: > 2 bytes
         [0x08 ()] + [control option ()] + [more bytes if packet needs more context...]
 
+Flow Join packet (user joined channel):
+    S2C: > 1 byte
+        [0x0a ()] + [UTF-8 encoded string (username) ...]
 
+Flow Leave packet (user left channel):
+    S2C: > 1 byte
+        [0x0b ()] + [UTF-8 encoded string (username) ...]
+
+Sync Commands packet:
+    C2S: 1 byte
+        [0x0c ()]
+
+Console Command packet:
+    C2S: > 1 byte
+        [0x0d ()] + [UTF-8 encoded string (command) ...]
+    S2C: > 1 byte
+        [0x0d ()] + [UTF-8 encoded string (response) ...]
+
+Flow Renick packet (user changed nickname):
+    S2C: > 2 bytes
+        [0x10 ()] + [old_mask_len ()] + [old_mask ...] + [new_mask_len ()] + [new_mask ...]
+
+DM packet (direct message / broadcast):
+    S2C: > 1 byte
+        [0x11 ()] + [UTF-8 encoded string (message) ...]
+
+Register Console packet:
+    C2S: > 1 byte
+        [0xff ()] + [UTF-8 encoded string (console name) ...]
+
+--- Console packet types (for already registered consoles) ---
+    0x03: console EOF
+    0x04: console keepalive
+    0x0d: console command
 
 --- Control options ---
     0x01: set deafened
     0x02: set undeafened
     0x03: set muted
     0x04: set unmuted
-    0x05: set volume + u8 representing volume (0x0 lowest, Dm111111 highest)
+
+--- Internal flags for packet processing (non-standard, for reliable transport) ---
+    0x80: reliable flag
+    0x81: ack flag
