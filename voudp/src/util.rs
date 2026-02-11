@@ -11,13 +11,7 @@ use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
 
 use crate::client::Message;
-
-pub const VOUDP_SALT: &[u8; 5] = b"voudp";
-pub const PASSWORD: &str = "password";
-
-// internal flags for packet processing:
-const RELIABLE_FLAG: u8 = 0x80;
-const ACK_FLAG: u8 = 0x81;
+use crate::protocol::{ACK_FLAG, ClientPacketType, ControlRequest, RELIABLE_FLAG};
 
 #[derive(Debug, Clone)]
 pub struct ChannelInfo {
@@ -55,6 +49,7 @@ pub enum CommandResult {
     Error(String),
     Silent,
 }
+
 pub struct CommandContext {
     pub sender_addr: SocketAddr,
     pub sender_mask: Option<String>,
@@ -228,134 +223,103 @@ pub fn parse_command_list(bytes: &[u8]) -> Option<Vec<ServerCommand>> {
     Some(commands)
 }
 
-// pub fn parse_list_packet(bytes: &[u8]) -> Option<List> {
-//     if bytes.len() < 9 || bytes[0] != 0x05 {
-//         return None;
-//     }
-
-//     let unmasked_count = u32::from_be_bytes(bytes[1..5].try_into().ok()?);
-//     let masked_count = u32::from_be_bytes(bytes[5..9].try_into().ok()?);
-
-//     let mut masks = Vec::new();
-//     let mut i = 9;
-
-//     for _ in 0..masked_count {
-//         // Find string terminator
-//         let sep_pos = bytes[i..].iter().position(|&b| b == 0x01)?;
-//         let mask_str = String::from_utf8(bytes[i..i + sep_pos].to_vec()).ok()?;
-//         i += sep_pos + 1; // move past mask + separator
-
-//         // Read flags
-//         if i >= bytes.len() {
-//             return None;
-//         }
-//         let flags = bytes[i];
-//         i += 1;
-
-//         let muted = flags & 0b00000001 != 0;
-//         let deafened = flags & 0b00000010 != 0;
-
-//         masks.push((mask_str, muted, deafened));
-//     }
-
-//     Some((unmasked_count, masked_count, masks))
-// }
-
 pub fn parse_msg_packet(data: &[u8]) -> Result<(String, String), String> {
-    // Must start with 0x06
-    if data.first() != Some(&0x06) {
-        return Err("packet does not start with 0x06".into());
+    // Check packet type
+    if data.is_empty() {
+        return Err("empty packet".into());
     }
 
-    // Find the 0x01 separator after the username
-    let sep_index = match data.iter().position(|&b| b == 0x01) {
-        Some(i) => i,
-        None => return Err("no 0x01 separator found".into()),
-    };
+    match ClientPacketType::try_from(data[0]) {
+        Ok(ClientPacketType::Chat) => {
+            // Find the 0x01 separator after the username
+            let sep_index = match data[1..].iter().position(|&b| b == 0x01) {
+                Some(i) => i + 1, // +1 because we started from index 1
+                None => return Err("no 0x01 separator found".into()),
+            };
 
-    if sep_index <= 1 {
-        return Err("username is empty".into());
+            if sep_index <= 1 {
+                return Err("username is empty".into());
+            }
+
+            // Username slice (skip 0x06, end right before 0x01)
+            let username_bytes = &data[1..sep_index];
+            // Message slice (everything after 0x01)
+            let message_bytes = &data[sep_index + 1..];
+
+            // Decode UTF-8
+            let username = String::from_utf8(username_bytes.to_vec())
+                .map_err(|_| "invalid UTF-8 in username")?;
+            let message = String::from_utf8(message_bytes.to_vec())
+                .map_err(|_| "invalid UTF-8 in message")?;
+
+            Ok((username, message))
+        }
+        _ => Err("not a chat packet".into()),
     }
-
-    // Username slice (skip 0x06, end right before 0x01)
-    let username_bytes = &data[1..sep_index];
-    // Message slice (everything after 0x01)
-    let message_bytes = &data[sep_index + 1..];
-
-    // Decode UTF-8
-    let username =
-        String::from_utf8(username_bytes.to_vec()).map_err(|_| "invalid UTF-8 in username")?;
-    let message =
-        String::from_utf8(message_bytes.to_vec()).map_err(|_| "invalid UTF-8 in message")?;
-
-    Ok((username, message))
 }
 
 pub fn parse_flow_packet(data: &[u8]) -> Option<Message> {
-    match data.first() {
-        Some(byte) => match byte {
-            0x0a => {
-                let uname = &data[1..];
-                let Ok(uname) = String::from_utf8(uname.to_vec()) else {
-                    return None;
-                };
-
-                Some(Message::JoinMessage(uname))
-            }
-            0x0b => {
-                let uname = &data[1..];
-                let Ok(uname) = String::from_utf8(uname.to_vec()) else {
-                    return None;
-                };
-
-                Some(Message::LeaveMessage(uname))
-            }
-            0x10 => {
-                let mut i = 1;
-                let old_mask_len = u8::from_be_bytes([data[i]]);
-                i += 1;
-                let old_mask =
-                    String::from_utf8(data[i..i + old_mask_len as usize].to_vec()).ok()?;
-                i += old_mask_len as usize;
-
-                let new_mask_len = u8::from_be_bytes([data[i]]);
-                i += 1;
-                let new_mask =
-                    String::from_utf8(data[i..i + new_mask_len as usize].to_vec()).ok()?;
-                Some(Message::Renick(old_mask, new_mask))
-            }
-            0x11 => {
-                let msg = &data[1..];
-                let Ok(msg) = String::from_utf8(msg.to_vec()) else {
-                    return None;
-                };
-
-                Some(Message::Broadcast("Server".into(), msg))
-            }
-            _ => None,
-        },
-        None => None,
+    if data.is_empty() {
+        return None;
     }
-}
-pub enum ControlRequest {
-    SetDeafen,
-    SetUndeafen,
-    SetMute,
-    SetUnmute,
-    SetVolume(u8),
+
+    match ClientPacketType::try_from(data[0]) {
+        Ok(ClientPacketType::FlowJoin) => {
+            let uname = &data[1..];
+            let Ok(uname) = String::from_utf8(uname.to_vec()) else {
+                return None;
+            };
+            Some(Message::JoinMessage(uname))
+        }
+        Ok(ClientPacketType::FlowLeave) => {
+            let uname = &data[1..];
+            let Ok(uname) = String::from_utf8(uname.to_vec()) else {
+                return None;
+            };
+            Some(Message::LeaveMessage(uname))
+        }
+        Ok(ClientPacketType::FlowRenick) => {
+            let mut i = 1;
+            let old_mask_len = u8::from_be_bytes([data[i]]);
+            i += 1;
+            let old_mask = String::from_utf8(data[i..i + old_mask_len as usize].to_vec()).ok()?;
+            i += old_mask_len as usize;
+
+            let new_mask_len = u8::from_be_bytes([data[i]]);
+            i += 1;
+            let new_mask = String::from_utf8(data[i..i + new_mask_len as usize].to_vec()).ok()?;
+            Some(Message::Renick(old_mask, new_mask))
+        }
+        Ok(ClientPacketType::Dm) => {
+            let msg = &data[1..];
+            let Ok(msg) = String::from_utf8(msg.to_vec()) else {
+                return None;
+            };
+            Some(Message::Broadcast("Server".into(), msg))
+        }
+        _ => None,
+    }
 }
 
 pub fn parse_control_packet(data: &[u8]) -> Result<ControlRequest, String> {
-    let req = match data[0] {
-        0x01 => ControlRequest::SetDeafen,
-        0x02 => ControlRequest::SetUndeafen,
-        0x03 => ControlRequest::SetMute,
-        0x04 => ControlRequest::SetUnmute,
-        0x05 => ControlRequest::SetVolume(data[1]),
-        _ => return Err("Invalid control packet".into()),
-    };
+    if data.is_empty() {
+        return Err("empty packet".into());
+    }
 
-    Ok(req)
+    match data[0] {
+        0x01 => Ok(ControlRequest::SetDeafen),
+        0x02 => Ok(ControlRequest::SetUndeafen),
+        0x03 => Ok(ControlRequest::SetMute),
+        0x04 => Ok(ControlRequest::SetUnmute),
+        // 0x05 => {
+        //     if data.len() < 2 {
+        //         Err("volume packet too short".into())
+        //     } else {
+        //         Ok(ControlRequest::SetVolume(data[1]))
+        //     }
+        // }
+        _ => Err("Invalid control packet".into()),
+    }
 }
 
 pub fn derive_key_from_phrase(phrase: &[u8], salt: &[u8]) -> Key {
@@ -376,7 +340,6 @@ pub struct SecureUdpSocket {
 impl Clone for SecureUdpSocket {
     fn clone(&self) -> Self {
         let cloned_socket = self.socket.try_clone().expect("failed to clone UdpSocket");
-
         let cipher = self.cipher.clone();
 
         Self {
@@ -450,7 +413,7 @@ impl SecureUdpSocket {
     pub fn send_reliable_to(&self, buf: &[u8], addr: SocketAddr) -> Result<u32, io::Error> {
         let seq = self.seq_counter.fetch_add(1, Ordering::Relaxed);
 
-        let mut wrapped = Vec::with_capacity(1 + 4 * buf.len());
+        let mut wrapped = Vec::with_capacity(1 + 4 + buf.len());
         wrapped.push(RELIABLE_FLAG);
         wrapped.extend_from_slice(&seq.to_be_bytes());
         wrapped.extend_from_slice(buf);
@@ -463,7 +426,7 @@ impl SecureUdpSocket {
     pub fn send_ack(&self, seq: u32, addr: SocketAddr) -> io::Result<usize> {
         let mut ack_plain = [0u8; 5];
         ack_plain[0] = ACK_FLAG;
-        ack_plain[1..4].copy_from_slice(&seq.to_be_bytes());
+        ack_plain[1..5].copy_from_slice(&seq.to_be_bytes());
 
         self.send_to(&ack_plain, addr)
     }
@@ -481,13 +444,13 @@ impl SecureUdpSocket {
     > {
         let (size, addr) = match self.socket.recv_from(buf) {
             Ok(ok) => ok,
-            Err(e) => return Err((e, SocketAddr::from(([0, 0, 0, 0], 0)))), // no addr yet
+            Err(e) => return Err((e, SocketAddr::from(([0, 0, 0, 0], 0)))),
         };
 
         if size < 12 {
             if size == 1 && buf[0] == 0xf {
                 return Err((
-                    io::Error::new(io::ErrorKind::Unsupported, "unencrpyted"),
+                    io::Error::new(io::ErrorKind::Unsupported, "unencrypted"),
                     addr,
                 ));
             } else {

@@ -10,6 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::protocol::{self, ClientPacketType};
 use crate::util::{self, ChannelInfo, SecureUdpSocket, ServerCommand};
 
 const TARGET_FRAME_SIZE: usize = 960; // 20ms at 48kHz
@@ -60,7 +61,7 @@ type SafeCommandList = Arc<Mutex<Vec<ServerCommand>>>;
 
 impl ClientState {
     pub fn new(ip: &str, channel_id: u32, phrase: &[u8]) -> Result<Self, io::Error> {
-        let key = util::derive_key_from_phrase(phrase, util::VOUDP_SALT);
+        let key = util::derive_key_from_phrase(phrase, protocol::VOUDP_SALT);
         let mut socket = SecureUdpSocket::create("0.0.0.0:0".into(), key)?; // let OS decide port
 
         socket.connect(ip)?;
@@ -323,21 +324,23 @@ impl ClientState {
 
         let mut test = Instant::now();
         let mut ping_reply = Instant::now();
+
         loop {
             if !connected.load(Ordering::Relaxed) {
                 break;
             }
 
-            // send
+            // send periodic requests
             if test.elapsed() > Duration::from_secs(1) {
-                let list_packet = vec![0x05];
-                let cmd_list_packet = vec![0x0c];
-                socket.send(&list_packet).unwrap();
-                socket.send(&cmd_list_packet).unwrap();
+                socket.send(&protocol::create_list_request()).unwrap();
+                socket
+                    .send(&protocol::create_sync_commands_request())
+                    .unwrap();
                 test = Instant::now();
                 ping_reply = Instant::now();
             }
 
+            // send audio
             {
                 let mut buffer = input.lock().unwrap();
                 let muted = muted.load(Ordering::Relaxed);
@@ -355,75 +358,74 @@ impl ClientState {
 
                     let mut opus_data = vec![0u8; 400];
                     if !muted && let Ok(len) = encoder.encode_float(&frame_buf, &mut opus_data) {
-                        let mut packet = vec![0x02];
-                        packet.extend_from_slice(&opus_data[..len]);
+                        let packet = protocol::create_audio_packet(&opus_data[..len]);
                         let _ = socket.send(&packet);
                     }
                 }
             }
 
             // receive
+            type Cpt = ClientPacketType;
             match socket.recv_from(&mut recv_buf) {
-                Ok((size, _)) if size > 1 && recv_buf[0] == 0x02 => {
-                    let mut pcm = vec![0.0f32; TARGET_FRAME_SIZE * 2];
-                    if let Ok(decoded) = decoder.decode_float(&recv_buf[1..size], &mut pcm, false)
-                        && decoded > 0
-                    {
-                        let mut buffer = output.lock().unwrap();
-                        for s in &pcm[..(decoded * 2)] {
-                            if buffer.len() >= BUFFER_CAPACITY * 2 {
-                                buffer.pop_front();
+                Ok((size, _)) if size > 1 => match Cpt::try_from(recv_buf[0]) {
+                    Ok(Cpt::Audio) => {
+                        let mut pcm = vec![0.0f32; TARGET_FRAME_SIZE * 2];
+                        if let Ok(decoded) =
+                            decoder.decode_float(&recv_buf[1..size], &mut pcm, false)
+                            && decoded > 0
+                        {
+                            let mut buffer = output.lock().unwrap();
+                            for s in &pcm[..(decoded * 2)] {
+                                if buffer.len() >= BUFFER_CAPACITY * 2 {
+                                    buffer.pop_front();
+                                }
+                                buffer.push_back(*s);
                             }
-                            buffer.push_back(*s);
                         }
                     }
-                }
-                Ok((size, _)) if size > 1 && recv_buf[0] == 0x05 => {
-                    let packet = &recv_buf[..size];
-                    let Some(parsed) = util::parse_global_list(&packet[1..]) else {
-                        eprintln!("error: Received bad list");
-                        continue;
-                    };
+                    Ok(Cpt::List) => {
+                        let packet = &recv_buf[..size];
+                        let Some(parsed) = util::parse_global_list(&packet[1..]) else {
+                            eprintln!("error: Received bad list");
+                            continue;
+                        };
 
-                    {
-                        let mut list = list.lock().unwrap();
-                        list.channels = parsed.0;
-                        list.current_channel = parsed.1;
-                        list.last_updated = Instant::now();
+                        {
+                            let mut list = list.lock().unwrap();
+                            list.channels = parsed.0;
+                            list.current_channel = parsed.1;
+                            list.last_updated = Instant::now();
 
-                        ping.store(
-                            Instant::now().duration_since(ping_reply).as_millis() as u16,
-                            Ordering::Relaxed,
-                        );
+                            ping.store(
+                                Instant::now().duration_since(ping_reply).as_millis() as u16,
+                                Ordering::Relaxed,
+                            );
+                        }
                     }
-                }
-                Ok((size, _)) if size > 1 && recv_buf[0] == 0x06 => {
-                    match util::parse_msg_packet(&recv_buf[..size]) {
+                    Ok(Cpt::Chat) => match util::parse_msg_packet(&recv_buf[..size]) {
                         Ok((username, text)) => {
                             let _ = tx.send((Message::ChatMessage(username, text), Local::now()));
                         }
                         Err(e) => {
                             eprintln!("error: {e}");
                         }
+                    },
+                    Ok(Cpt::FlowJoin) | Ok(Cpt::FlowLeave) | Ok(Cpt::FlowRenick) | Ok(Cpt::Dm) => {
+                        if let Some(msg) = util::parse_flow_packet(&recv_buf[..size]) {
+                            let _ = tx.send((msg, Local::now()));
+                        }
                     }
-                }
-                Ok((size, _))
-                    if size > 1
-                        && (recv_buf[0] == 0x0a
-                            || recv_buf[0] == 0x0b
-                            || recv_buf[0] == 0x10
-                            || recv_buf[0] == 0x11) =>
-                {
-                    if let Some(msg) = util::parse_flow_packet(&recv_buf[..size]) {
-                        let _ = tx.send((msg, Local::now()));
+                    Ok(Cpt::SyncCommands) => {
+                        if let Some(commands) = util::parse_command_list(&recv_buf[1..size]) {
+                            let mut list = cmd_list.lock().unwrap();
+                            *list = commands;
+                        }
                     }
-                }
-                Ok((size, _)) if size > 1 && recv_buf[0] == 0x0c => {
-                    if let Some(commands) = util::parse_command_list(&recv_buf[1..size]) {
-                        let mut list = cmd_list.lock().unwrap();
-                        *list = commands;
-                    }
-                }
+                    Ok(Cpt::Cmd) => {}
+                    Ok(Cpt::Eof) => {}
+                    Ok(Cpt::Join) | Ok(Cpt::Mask) | Ok(Cpt::Ctrl) | Ok(Cpt::RegisterConsole) => {}
+                    Err(_) => {}
+                },
                 Ok((_, _)) => {}
                 Err(e) if e.0.kind() == io::ErrorKind::WouldBlock => {
                     thread::sleep(Duration::from_millis(1));

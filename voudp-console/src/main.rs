@@ -16,7 +16,8 @@ use crossterm::{
     },
 };
 
-use voudp::util::{self, SecureUdpSocket, VOUDP_SALT};
+use voudp::protocol::VOUDP_SALT;
+use voudp::util::{self, SecureUdpSocket};
 
 enum LogMsg {
     Line(String),

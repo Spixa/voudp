@@ -42,4 +42,4 @@ Control packet:
     0x02: set undeafened
     0x03: set muted
     0x04: set unmuted
-    0x05: set volume + u8 representing volume (0x0 lowest, 0x11111111 highest)
+    0x05: set volume + u8 representing volume (0x0 lowest, Dm111111 highest)

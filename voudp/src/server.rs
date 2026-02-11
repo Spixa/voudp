@@ -15,11 +15,10 @@ use std::{
 
 use crate::{
     commands::CommandSystem,
+    console_cmd::{ConsoleCommandResult, handle_command},
     mixer,
-    util::{
-        self, CommandCategory, CommandContext, CommandResult, ControlRequest, PASSWORD,
-        SecureUdpSocket,
-    },
+    protocol::{self, ClientPacketType, ConsolePacketType, ControlRequest, PASSWORD},
+    util::{self, CommandCategory, CommandContext, CommandResult, SecureUdpSocket},
 };
 const JITTER_BUFFER_LEN: usize = 50;
 
@@ -74,12 +73,12 @@ struct RemoteStatus {
     mute: bool,
 }
 
-struct Remote {
+pub struct Remote {
     encoder: Encoder,
     decoder: Decoder,
     last_active: Instant,
     channel_id: u32,
-    addr: SocketAddr,
+    pub(crate) addr: SocketAddr,
     mask: Option<String>,
     jitter_buffer: VecDeque<Vec<f32>>,
     status: RemoteStatus,
@@ -123,17 +122,17 @@ impl Console {
 
 type SafeRemote = Arc<Mutex<Remote>>;
 type SafeConsole = Arc<Mutex<Console>>;
-struct Channel {
-    name: Option<String>,
-    _id: u32,
-    remotes: Vec<SafeRemote>,
-    buffers: HashMap<SocketAddr, Vec<f32>>,
-    filter_states: HashMap<SocketAddr, (f32, f32)>,
-    server_config: ServerConfig,
+pub struct Channel {
+    pub name: Option<String>,
+    pub _id: u32,
+    pub remotes: Vec<SafeRemote>,
+    pub buffers: HashMap<SocketAddr, Vec<f32>>,
+    pub filter_states: HashMap<SocketAddr, (f32, f32)>,
+    pub server_config: ServerConfig,
 }
 
 impl Channel {
-    fn new(server_config: ServerConfig, name: String, _id: u32) -> Self {
+    pub fn new(server_config: ServerConfig, name: String, _id: u32) -> Self {
         info!("Created new channel with {_id}");
         Self {
             name: Some(name),
@@ -255,7 +254,7 @@ pub struct ServerState {
 impl ServerState {
     pub fn new(config: ServerConfig, phrase: &[u8]) -> Result<Self, io::Error> {
         info!("Deriving key from phrase...");
-        let key = util::derive_key_from_phrase(phrase, util::VOUDP_SALT);
+        let key = util::derive_key_from_phrase(phrase, protocol::VOUDP_SALT);
         let socket = SecureUdpSocket::create(format!("0.0.0.0:{}", config.bind_port), key)?;
 
         info!("Bound to 0.0.0.0:{}", config.bind_port);
@@ -282,10 +281,11 @@ impl ServerState {
     }
 
     fn handle_console(&mut self, addr: SocketAddr, data: &[u8]) {
-        match data[0] {
-            0x0d => self.handle_console_command(addr, &data[1..]),
-            0x03 => self.handle_console_eof(addr),
-            0x04 => {}
+        type Cpt = ConsolePacketType;
+        match ConsolePacketType::try_from(data[0]) {
+            Ok(Cpt::Cmd) => self.handle_console_command(addr, &data[1..]),
+            Ok(Cpt::Eof) => self.handle_console_eof(addr),
+            Ok(Cpt::Keepalive) => {}
             _ => error!(
                 "Console {addr} sent an invalid packet (starts with {:#?}",
                 data[0]
@@ -300,122 +300,8 @@ impl ServerState {
             let reply: String = if !parts.is_empty() {
                 let cmd = parts[0];
 
-                match cmd {
-                    "help" => "you are connected to a voudp 0.1 server".into(),
-                    "ping" => "pong".into(),
-                    "list" => {
-                        format!("global list cannot be displayed with crossterm")
-                    }
-                    "rename" => {
-                        if parts.len() < 3 {
-                            "usage: rename <channel> <new-name>".to_string()
-                        } else {
-                            let ident = parts[1];
-                            let new_name = parts[2..].join(" ");
-
-                            let channel_opt = self
-                                .channels
-                                .iter_mut()
-                                .find(|(_, c)| c.name.as_deref() == Some(ident));
-
-                            match channel_opt {
-                                Some((_key, channel)) => {
-                                    let old_name = channel
-                                        .name
-                                        .replace(new_name.clone())
-                                        .unwrap_or("unnamed".into());
-
-                                    info!("Channel '{}' renamed to '{}'", old_name, new_name);
-
-                                    format!("renamed channel '{}' -> '{}'", old_name, new_name)
-                                }
-                                None => format!("channel '{}' not found", ident),
-                            }
-                        }
-                    }
-                    "chans" => {
-                        let s = self
-                            .channels
-                            .iter()
-                            .map(|(id, channel)| {
-                                format!(
-                                    "{} ({})",
-                                    channel.name.clone().unwrap_or_else(|| "unnamed".into()),
-                                    id
-                                )
-                            })
-                            .collect::<Vec<_>>()
-                            .join(", ");
-                        s
-                    }
-                    "create" => {
-                        if parts.len() < 2 {
-                            "usage: create <channel_name>".into()
-                        } else {
-                            let name = parts[1..].join(" ");
-
-                            let new_id = self.channels.keys().max().map_or(1, |id| id + 1);
-                            self.channels
-                                .insert(new_id, Channel::new(self.config, name.clone(), new_id));
-                            format!(
-                                "created channel '{}' with id {} ({}kHz) ",
-                                name,
-                                new_id,
-                                self.config.sample_rate as f64 / 1000.0
-                            )
-                        }
-                    }
-                    "del" => {
-                        if parts.len() < 2 {
-                            "usage: del <channel_id|channel_name>".into()
-                        } else {
-                            let target = parts[1];
-                            let maybe_channel_id = target.parse::<u32>().ok();
-
-                            let channel_id_to_delete = if let Some(id) = maybe_channel_id {
-                                if id == 1 { None } else { Some(id) }
-                            } else {
-                                // search by name
-                                self.channels
-                                    .iter()
-                                    .find(|(_, c)| c.name.as_deref() == Some(target))
-                                    .map(|(id, _)| *id)
-                            };
-
-                            if let Some(channel_id) = channel_id_to_delete {
-                                if channel_id == 1 {
-                                    "cannot delete the default channel defined by the voudp protocol".into()
-                                } else if let Some(channel) = self.channels.remove(&channel_id) {
-                                    // if let Some(default_channel) = self.channels.get_mut(&1) {
-                                    //     default_channel
-                                    //         .remotes
-                                    //         .extend(channel.remotes.iter().cloned());
-                                    // }
-
-                                    // notify users
-                                    channel.remotes.iter().for_each(|r| {
-                                        let addr = r.lock().unwrap().addr;
-                                        self.dm(
-                                            addr,
-                                            "The channel you were in was deleted. Move to a new one".to_owned(),
-                                        );
-                                    });
-
-                                    format!(
-                                        "deleted channel '{}' (id {}) and moved users to default",
-                                        channel.name.unwrap_or_else(|| "unknown".into()),
-                                        channel_id
-                                    )
-                                } else {
-                                    "channel not found".into()
-                                }
-                            } else {
-                                "channel not found".into()
-                            }
-                        }
-                    }
-
-                    _ => "unknown command. read the manual on executing remote commands".into(),
+                match handle_command(cmd, &parts, &mut self.channels, &self.config, None) {
+                    ConsoleCommandResult::Reply(msg) => msg,
                 }
             } else {
                 "server received your empty message".into()
@@ -449,17 +335,18 @@ impl ServerState {
             return;
         }
 
-        match data[0] {
-            0x01 => self.handle_join(addr, &data[1..]),
-            0x02 => self.handle_audio(addr, &data[1..]),
-            0x03 => self.handle_eof(addr),
-            0x04 => self.handle_mask(addr, &data[1..]),
-            0x05 => self.handle_list(addr),
-            0x06 => self.handle_chat(addr, &data[1..]),
-            0x08 => self.handle_ctrl(addr, &data[1..]),
-            0x0c => self.handle_sync_commands(addr),
-            0x0d => self.handle_cmd(addr, &data[1..]),
-            0xff => self.register_console(addr, &data[1..]),
+        type Cpt = ClientPacketType;
+        match ClientPacketType::try_from(data[0]) {
+            Ok(Cpt::Join) => self.handle_join(addr, &data[1..]),
+            Ok(Cpt::Audio) => self.handle_audio(addr, &data[1..]),
+            Ok(Cpt::Eof) => self.handle_eof(addr),
+            Ok(Cpt::Mask) => self.handle_mask(addr, &data[1..]),
+            Ok(Cpt::List) => self.handle_list(addr),
+            Ok(Cpt::Chat) => self.handle_chat(addr, &data[1..]),
+            Ok(Cpt::Ctrl) => self.handle_ctrl(addr, &data[1..]),
+            Ok(Cpt::SyncCommands) => self.handle_sync_commands(addr),
+            Ok(Cpt::Cmd) => self.handle_cmd(addr, &data[1..]),
+            Ok(Cpt::RegisterConsole) => self.register_console(addr, &data[1..]),
             _ => error!(
                 "{} sent an invalid packet (starts with {:#?})",
                 addr, data[0]
@@ -629,7 +516,6 @@ impl ServerState {
             addr, new_mask, channel_id
         );
 
-        // Broadcast to all remotes in the channel
         let packet = if let Some(old) = old_mask {
             let mut packet = vec![0x10];
             packet.push(old.len() as u8);
@@ -789,13 +675,14 @@ impl ServerState {
         };
         let mut remote = remote.lock().unwrap();
 
+        type Cq = ControlRequest;
         match util::parse_control_packet(data) {
             Ok(req) => match req {
-                ControlRequest::SetDeafen => remote.status.deaf = true,
-                ControlRequest::SetUndeafen => remote.status.deaf = false,
-                ControlRequest::SetMute => remote.status.mute = true,
-                ControlRequest::SetUnmute => remote.status.mute = false,
-                ControlRequest::SetVolume(_) => warn!("{addr} accessed an unimplemented feature"),
+                Cq::SetDeafen => remote.status.deaf = true,
+                Cq::SetUndeafen => remote.status.deaf = false,
+                Cq::SetMute => remote.status.mute = true,
+                Cq::SetUnmute => remote.status.mute = false,
+                // Cq::SetVolume(_) => warn!("{addr} accessed an unimplemented feature"),
             },
             Err(e) => {
                 warn!("{addr} sent a bad control packet: {e}");
@@ -857,14 +744,15 @@ impl ServerState {
             packet.push(cmd.usage.len() as u8);
             packet.extend_from_slice(cmd.usage.as_bytes());
 
+            type Cc = CommandCategory;
             let category_byte = match cmd.category {
-                CommandCategory::User => 0,
-                CommandCategory::Channel => 1,
-                CommandCategory::Audio => 2,
-                CommandCategory::Chat => 3,
-                CommandCategory::Admin => 4,
-                CommandCategory::Utility => 5,
-                CommandCategory::Fun => 6,
+                Cc::User => 0,
+                Cc::Channel => 1,
+                Cc::Audio => 2,
+                Cc::Chat => 3,
+                Cc::Admin => 4,
+                Cc::Utility => 5,
+                Cc::Fun => 6,
             };
             packet.push(category_byte);
 
