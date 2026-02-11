@@ -40,7 +40,9 @@ pub fn bubble_ui(
         .show(ui, |ui| {
             ui.set_max_width(300.0);
             ui.horizontal(|ui| {
+                ui.style_mut().wrap = Some(true);
                 ui.label(egui::RichText::new(msg).color(text_color).size(14.0));
+                ui.style_mut().wrap = None;
                 ui.add_space(8.0);
                 ui.label(
                     egui::RichText::new(format!("{}", time.format("%H:%M")))
@@ -55,46 +57,7 @@ pub fn bubble_ui(
         });
 }
 
-fn name_color(_: &str) -> egui::Color32 {
+fn _name_color(_: &str) -> egui::Color32 {
     Color32::YELLOW
 }
-// For parsed messages with name + content
-pub fn bubble_ui_with_name(
-    ui: &mut egui::Ui,
-    display_name: &str,
-    content: &str,
-    time: &chrono::DateTime<Local>,
-    bubble_color: egui::Color32,
-    text_color: egui::Color32,
-) {
-    egui::Frame::none()
-        .fill(bubble_color)
-        .rounding(egui::Rounding::same(12.0))
-        .inner_margin(egui::vec2(12.0, 8.0))
-        .show(ui, |ui| {
-            ui.set_max_width(300.0);
-            ui.vertical(|ui| {
-                ui.label(
-                    egui::RichText::new(display_name)
-                        .color(name_color(display_name))
-                        .size(13.0)
-                        .strong(),
-                );
 
-                // Message + timestamp on same line
-                ui.horizontal(|ui| {
-                    ui.label(egui::RichText::new(content).color(text_color).size(14.0));
-                    ui.add_space(8.0);
-                    ui.label(
-                        egui::RichText::new(format!("{}", time.format("%H:%M")))
-                            .color(if text_color == egui::Color32::WHITE {
-                                egui::Color32::from_rgb(200, 220, 255)
-                            } else {
-                                egui::Color32::from_rgb(120, 120, 120)
-                            })
-                            .size(11.0),
-                    );
-                });
-            });
-        });
-}

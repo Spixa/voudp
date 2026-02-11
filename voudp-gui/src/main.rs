@@ -19,7 +19,7 @@ use voudp::{
     util::{SecureUdpSocket, ServerCommand},
 };
 
-use crate::bubble::{bubble_ui, bubble_ui_with_name, parse_chat_message, parse_system_message};
+use crate::bubble::{bubble_ui, parse_chat_message, parse_system_message};
 
 fn main() -> Result<()> {
     pretty_env_logger::init_timed();
@@ -336,9 +336,15 @@ impl eframe::App for GuiClientApp {
 
                     ui.separator();
 
+                    let aw = ui.available_width();
                     egui::ScrollArea::vertical()
+                        .stick_to_bottom(true)
+                        .stick_to_right(true)
+                        .max_width(aw)
                         .auto_shrink(false)
                         .show(ui, |ui| {
+                            ui.set_width(aw);
+
                             if self.global_list.channels.is_empty() {
                                 ui.vertical_centered(|ui| {
                                     ui.add_space(20.0);
@@ -602,16 +608,16 @@ impl eframe::App for GuiClientApp {
                             }
 
                             // Try to parse as chat message
-                            if let Some((channel, name, content)) = parse_chat_message(msg) {
+                            if let Some((_, name, content)) = parse_chat_message(msg) {
                                 // Colors
-                                let (bubble_color, text_color) = if is_self {
+                                let (_, text_color) = if is_self {
                                     (Color32::from_rgb(0, 120, 215), Color32::WHITE) // blue bubble, white text
                                 } else {
                                     (Color32::from_rgb(240, 240, 240), Color32::BLACK) // light gray, black text
                                 };
 
                                 // Channel label (above bubble)
-                                let channel_label = format!("#{}", channel);
+                                let channel_label = format!("{}", name);
                                 if is_self {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::TOP),
@@ -619,9 +625,8 @@ impl eframe::App for GuiClientApp {
                                             ui.add_space(4.0);
                                             ui.label(
                                                 egui::RichText::new(channel_label)
-                                                    .color(Color32::from_rgb(150, 150, 150))
-                                                    .size(11.0)
-                                                    .monospace(),
+                                                    .color(Color32::LIGHT_YELLOW)
+                                                    .size(13.0)
                                             );
                                             ui.add_space(4.0);
                                         },
@@ -640,29 +645,24 @@ impl eframe::App for GuiClientApp {
                                 }
 
                                 // Bubble with name and message
-                                let display_name = name;
                                 if is_self {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::TOP),
                                         |ui| {
-                                            bubble_ui_with_name(
+                                            bubble_ui(
                                                 ui,
-                                                &display_name,
                                                 &content,
                                                 time,
-                                                bubble_color,
                                                 text_color,
                                             );
                                         },
                                     );
                                 } else {
                                     ui.horizontal(|ui| {
-                                        bubble_ui_with_name(
+                                        bubble_ui(
                                             ui,
-                                            &display_name,
                                             &content,
                                             time,
-                                            bubble_color,
                                             text_color,
                                         );
                                     });

@@ -27,7 +27,7 @@ Chat Packet:
     C2S: > 1 byte
         [0x06 ()] + [UTF-8 encoded string (chat message) ...]
     S2C: > 1 byte
-        [0x06 ()] + [UTF-8 encoded string (sender name) ...] + [0x01 delimiter ()] + [UTF-8 encoded string (chat message) ...]
+        [0x06 ()] + [UTF-8 encoded string (sender name) ...] + [0x01 delimiter ()] + [Sender team (for now: self (0x01) or not (0x00)) ()] + [UTF-8 encoded string (chat message) ...]
 
 Nick error packet:
     S2C: 1 byte
