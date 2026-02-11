@@ -223,36 +223,43 @@ pub fn parse_command_list(bytes: &[u8]) -> Option<Vec<ServerCommand>> {
     Some(commands)
 }
 
-pub fn parse_msg_packet(data: &[u8]) -> Result<(String, String), String> {
-    // Check packet type
+pub fn parse_msg_packet(data: &[u8]) -> Result<(String, String, bool), String> {
     if data.is_empty() {
         return Err("empty packet".into());
+    }
+    if data.len() < 3 {
+        // at least [type, username, delim, flag, ...?]
+        return Err("packet too short".into());
     }
 
     match ClientPacketType::try_from(data[0]) {
         Ok(ClientPacketType::Chat) => {
-            // Find the 0x01 separator after the username
-            let sep_index = match data[1..].iter().position(|&b| b == 0x01) {
-                Some(i) => i + 1, // +1 because we started from index 1
-                None => return Err("no 0x01 separator found".into()),
+            // Find the delimiter (first 0x01 after the packet type)
+            let delimiter_pos = match data[1..].iter().position(|&b| b == 0x01) {
+                Some(pos) => 1 + pos, // absolute index
+                None => return Err("no 0x01 delimiter found".into()),
             };
 
-            if sep_index <= 1 {
+            if delimiter_pos == 1 {
                 return Err("username is empty".into());
             }
 
-            // Username slice (skip 0x06, end right before 0x01)
-            let username_bytes = &data[1..sep_index];
-            // Message slice (everything after 0x01)
-            let message_bytes = &data[sep_index + 1..];
-
-            // Decode UTF-8
+            // Username = bytes between index 1 and delimiter_pos
+            let username_bytes = &data[1..delimiter_pos];
             let username = String::from_utf8(username_bytes.to_vec())
                 .map_err(|_| "invalid UTF-8 in username")?;
+
+            // After delimiter: flag byte, then message
+            if data.len() <= delimiter_pos + 1 {
+                return Err("missing is_self flag".into());
+            }
+            let is_self = data[delimiter_pos + 1] != 0;
+
+            let message_bytes = &data[delimiter_pos + 2..];
             let message = String::from_utf8(message_bytes.to_vec())
                 .map_err(|_| "invalid UTF-8 in message")?;
 
-            Ok((username, message))
+            Ok((username, message, is_self))
         }
         _ => Err("not a chat packet".into()),
     }

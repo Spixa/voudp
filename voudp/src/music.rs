@@ -95,7 +95,7 @@ impl MusicClientState {
                                 Ok((size, _)) => {
                                     if size > 1 && recv_buf[0] == 0x06 {
                                         match util::parse_msg_packet(&recv_buf[..size]) {
-                                            Ok((caster, cmd)) => {
+                                            Ok((caster, cmd, _)) => {
                                                 if cmd.starts_with("#current") {
                                                     let mut msg_packet = vec![0x06];
                                                     msg_packet.extend_from_slice(

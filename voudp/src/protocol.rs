@@ -119,12 +119,6 @@ pub fn create_audio_packet(opus_data: &[u8]) -> Vec<u8> {
     packet
 }
 
-pub fn create_chat_packet(message: String) -> Vec<u8> {
-    let mut packet = vec![ClientPacketType::Chat as u8];
-    packet.extend(message.as_bytes());
-    packet
-}
-
 pub fn create_list_request() -> Vec<u8> {
     ClientPacketType::List.to_bytes()
 }

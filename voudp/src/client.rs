@@ -45,7 +45,7 @@ type OwnedMessage = (Message, DateTime<Local>);
 pub enum Message {
     JoinMessage(String),
     LeaveMessage(String),
-    ChatMessage(String, String),
+    ChatMessage(String, String, bool),
     Renick(String, String),
     Broadcast(String, String),
 }
@@ -403,8 +403,11 @@ impl ClientState {
                         }
                     }
                     Ok(Cpt::Chat) => match util::parse_msg_packet(&recv_buf[..size]) {
-                        Ok((username, text)) => {
-                            let _ = tx.send((Message::ChatMessage(username, text), Local::now()));
+                        Ok((username, text, is_self)) => {
+                            let _ = tx.send((
+                                Message::ChatMessage(username, text, is_self),
+                                Local::now(),
+                            ));
                         }
                         Err(e) => {
                             eprintln!("error: {e}");
@@ -415,9 +418,7 @@ impl ClientState {
                             let _ = tx.send((msg, Local::now())); // this is quite fucked
                         }
                     }
-                    Ok(Cpt::CommandResponse) => {
-                        
-                    }
+                    Ok(Cpt::CommandResponse) => {}
                     Ok(Cpt::SyncCommands) => {
                         if let Some(commands) = util::parse_command_list(&recv_buf[1..size]) {
                             let mut list = cmd_list.lock().unwrap();

@@ -644,12 +644,15 @@ impl ServerState {
                     return;
                 };
 
+                let sender_addr = addr;
                 for remote in channel.remotes.iter() {
                     let addr = { remote.lock().unwrap().addr };
+                    let is_self = addr.eq(&sender_addr);
 
-                    let mut msg_packet = vec![0x06];
+                    let mut msg_packet = vec![ClientPacketType::Chat as u8];
                     msg_packet.extend_from_slice(mask.as_bytes());
-                    msg_packet.extend([0x01]);
+                    msg_packet.push(0x01);
+                    msg_packet.push(is_self as u8);
                     msg_packet.extend_from_slice(data);
 
                     let _ = self.socket.send_to(&msg_packet, addr);

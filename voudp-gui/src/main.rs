@@ -1,3 +1,5 @@
+mod bubble;
+
 use anyhow::Result;
 use chrono::{DateTime, Local};
 use core::f32;
@@ -17,6 +19,8 @@ use voudp::{
     util::{SecureUdpSocket, ServerCommand},
 };
 
+use crate::bubble::{bubble_ui, bubble_ui_with_name, parse_chat_message, parse_system_message};
+
 fn main() -> Result<()> {
     pretty_env_logger::init_timed();
 
@@ -34,7 +38,7 @@ fn main() -> Result<()> {
     Ok(())
 }
 
-type LogVec = Arc<RwLock<Vec<(String, egui::Color32, DateTime<Local>)>>>;
+type LogVec = Arc<RwLock<Vec<(String, Color32, DateTime<Local>)>>>;
 
 struct GuiClientApp {
     global_list: GlobalListState,
@@ -537,29 +541,157 @@ impl eframe::App for GuiClientApp {
 
                 ui.separator();
 
-                // Logs area
+                let available_width = ui.available_width();
+                let available_height = ui.available_height();
+
+                ui.set_width(available_width);
                 egui::ScrollArea::vertical()
                     .stick_to_bottom(true)
                     .auto_shrink([false; 2])
-                    .max_width(f32::INFINITY)
-                    .max_height(ui.available_height() - 50.0)
+                    .max_width(available_width)
+                    .max_height(available_height - 50.0)
                     .show(ui, |ui| {
-                        for (msg, color, time) in self.logs.read().unwrap().iter() {
-                            ui.horizontal(|ui| {
-                                ui.label(
-                                    egui::RichText::new(format!("{}  ", time.format("%H:%M:%S")))
-                                        .color(egui::Color32::GRAY)
-                                        .monospace(),
-                                );
-                                ui.add(
-                                    egui::Label::new(
-                                        egui::RichText::new(msg)
-                                            .text_style(egui::TextStyle::Monospace)
-                                            .color(*color),
-                                    )
-                                    .wrap(true),
-                                );
-                            });
+                        // Remove default padding
+                        ui.spacing_mut().item_spacing = egui::vec2(0.0, 4.0);
+
+                        let logs = self.logs.read().unwrap();
+
+                        for (msg, color, time) in logs.iter() {
+                            let is_self = *color == Color32::LIGHT_BLUE || *color == Color32::BLUE;
+                            let is_system = *color == Color32::GRAY
+                                || *color == Color32::YELLOW
+                                || *color == Color32::LIGHT_GREEN;
+
+                            if is_system {
+                                if let Some((src, content)) = parse_system_message(msg) {
+                                    ui.vertical_centered(|ui| {
+                                        ui.add_space(4.0);
+
+                                        ui.label(
+                                            egui::RichText::new(src)
+                                                .color(*color)
+                                                .size(14.0)
+                                                .strong()
+                                                .monospace(),
+                                        );
+
+                                        ui.label(
+                                            egui::RichText::new(content)
+                                                .color(*color)
+                                                .size(12.0)
+                                                .italics(),
+                                        );
+
+                                        ui.add_space(4.0);
+                                    });
+                                } else {
+                                    // Fallback: display raw system message as before
+                                    ui.vertical_centered(|ui| {
+                                        ui.add_space(2.0);
+                                        ui.label(
+                                            egui::RichText::new(msg)
+                                                .color(*color)
+                                                .size(12.0)
+                                                .italics()
+                                                .strong(),
+                                        );
+                                        ui.add_space(2.0);
+                                    });
+                                }
+                                continue;
+                            }
+
+                            // Try to parse as chat message
+                            if let Some((channel, name, content)) = parse_chat_message(msg) {
+                                // Colors
+                                let (bubble_color, text_color) = if is_self {
+                                    (Color32::from_rgb(0, 120, 215), Color32::WHITE) // blue bubble, white text
+                                } else {
+                                    (Color32::from_rgb(240, 240, 240), Color32::BLACK) // light gray, black text
+                                };
+
+                                // Channel label (above bubble)
+                                let channel_label = format!("#{}", channel);
+                                if is_self {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::TOP),
+                                        |ui| {
+                                            ui.add_space(4.0);
+                                            ui.label(
+                                                egui::RichText::new(channel_label)
+                                                    .color(Color32::from_rgb(150, 150, 150))
+                                                    .size(11.0)
+                                                    .monospace(),
+                                            );
+                                            ui.add_space(4.0);
+                                        },
+                                    );
+                                } else {
+                                    ui.horizontal(|ui| {
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            egui::RichText::new(channel_label)
+                                                .color(Color32::from_rgb(150, 150, 150))
+                                                .size(11.0)
+                                                .monospace(),
+                                        );
+                                        ui.add_space(4.0);
+                                    });
+                                }
+
+                                // Bubble with name and message
+                                let display_name = name;
+                                if is_self {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::TOP),
+                                        |ui| {
+                                            bubble_ui_with_name(
+                                                ui,
+                                                &display_name,
+                                                &content,
+                                                time,
+                                                bubble_color,
+                                                text_color,
+                                            );
+                                        },
+                                    );
+                                } else {
+                                    ui.horizontal(|ui| {
+                                        bubble_ui_with_name(
+                                            ui,
+                                            &display_name,
+                                            &content,
+                                            time,
+                                            bubble_color,
+                                            text_color,
+                                        );
+                                    });
+                                }
+
+                                ui.add_space(2.0);
+                            } else {
+                                // Fallback: display raw message in bubble
+                                let text_color = if is_self {
+                                    Color32::WHITE
+                                } else {
+                                    Color32::BLACK
+                                };
+
+                                if is_self {
+                                    ui.with_layout(
+                                        egui::Layout::right_to_left(egui::Align::TOP),
+                                        |ui| {
+                                            bubble_ui(ui, msg, time, text_color);
+                                        },
+                                    );
+                                } else {
+                                    ui.horizontal(|ui| {
+                                        bubble_ui(ui, msg, time, text_color);
+                                    });
+                                }
+
+                                ui.add_space(2.0);
+                            }
                         }
                     });
 
@@ -656,7 +788,7 @@ impl eframe::App for GuiClientApp {
                             time,
                         ));
                     }
-                    Message::ChatMessage(name, content) => {
+                    Message::ChatMessage(name, content, is_self) => {
                         let channel = {
                             let id = self.current_channel_id;
 
@@ -671,13 +803,17 @@ impl eframe::App for GuiClientApp {
 
                         self.logs.write().unwrap().push((
                             format!("[#{channel}] {name}: {content}"),
-                            Color32::WHITE,
+                            if is_self {
+                                Color32::LIGHT_BLUE
+                            } else {
+                                Color32::WHITE
+                            },
                             time,
                         ));
                     }
-                    Message::Broadcast(alias, content) => {
+                    Message::Broadcast(src, content) => {
                         self.logs.write().unwrap().push((
-                            format!("[{alias}] {content}"),
+                            format!("[{src}] {content}"),
                             Color32::LIGHT_GREEN,
                             time,
                         ));
