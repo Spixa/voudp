@@ -26,7 +26,8 @@ pub enum ClientPacketType {
     FlowLeave = 0x0b,
     SyncCommands = 0x0c,
     Cmd = 0x0d,
-    // 0x0e-0x0f are reserved
+    CommandResponse = 0x0e,
+    // 0x0f is reserved
     FlowRenick = 0x10,
     Dm = 0x11,
     // 0x12-0xfe are reserved

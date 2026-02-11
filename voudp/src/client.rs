@@ -412,8 +412,11 @@ impl ClientState {
                     },
                     Ok(Cpt::FlowJoin) | Ok(Cpt::FlowLeave) | Ok(Cpt::FlowRenick) | Ok(Cpt::Dm) => {
                         if let Some(msg) = util::parse_flow_packet(&recv_buf[..size]) {
-                            let _ = tx.send((msg, Local::now()));
+                            let _ = tx.send((msg, Local::now())); // this is quite fucked
                         }
+                    }
+                    Ok(Cpt::CommandResponse) => {
+                        
                     }
                     Ok(Cpt::SyncCommands) => {
                         if let Some(commands) = util::parse_command_list(&recv_buf[1..size]) {
