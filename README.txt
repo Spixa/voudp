@@ -65,7 +65,7 @@ DM packet (direct message / broadcast):
 
 Register Console packet:
     C2S: > 1 byte
-        [0xff ()] + [UTF-8 encoded string (console name) ...]
+        [0xff ()] + [UTF-8 encoded string (server administration passwd) ...]
 
 --- Console packet types (for already registered consoles) ---
     0x03: console EOF
