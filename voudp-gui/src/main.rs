@@ -19,7 +19,7 @@ use voudp::{
     util::{SecureUdpSocket, ServerCommand},
 };
 
-use crate::bubble::{bubble_ui, parse_chat_message, parse_system_message};
+use crate::bubble::{badge, bubble_ui, parse_chat_message, parse_system_message};
 
 fn main() -> Result<()> {
     pretty_env_logger::init_timed();
@@ -312,164 +312,233 @@ impl eframe::App for GuiClientApp {
 
             egui::SidePanel::right("global_list_panel")
                 .resizable(true)
-                .default_width(250.0)
-                .min_width(200.0)
-                .max_width(400.0)
+                .default_width(280.0)
+                .min_width(220.0)
+                .max_width(420.0)
                 .show(ctx, |ui| {
-                    ui.heading("🌐 List");
+                    ui.spacing_mut().item_spacing.y = 4.0;
 
-                    // Server summary at the top
+                    // ===== Header =====
+                    ui.heading("Global Channels");
+                    ui.add_space(4.0);
+
                     let total_users = self
                         .global_list
                         .channels
                         .iter()
                         .map(|c| c.unmasked_count as usize + c.masked_users.len())
                         .sum::<usize>();
+
                     let total_channels = self.global_list.channels.len();
 
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("📊").size(18.0));
-                        ui.label(format!("{} users", total_users));
-                        ui.label("•");
-                        ui.label(format!("{} channels", total_channels));
-                    });
-
-                    ui.separator();
-
-                    let aw = ui.available_width();
-                    egui::ScrollArea::vertical()
-                        .stick_to_bottom(true)
-                        .stick_to_right(true)
-                        .max_width(aw)
-                        .auto_shrink(false)
+                    // ===== Compact stats =====
+                    egui::Frame::group(ui.style())
+                        .rounding(8.0)
+                        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
                         .show(ui, |ui| {
-                            ui.set_width(aw);
+                            ui.horizontal(|ui| {
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new("Users").small().color(Color32::GRAY));
+                                    ui.label(
+                                        RichText::new(total_users.to_string()).strong().size(16.0),
+                                    );
+                                });
+                                ui.separator();
+                                ui.vertical(|ui| {
+                                    ui.label(
+                                        RichText::new("Channels").small().color(Color32::GRAY),
+                                    );
+                                    ui.label(
+                                        RichText::new(total_channels.to_string())
+                                            .strong()
+                                            .size(16.0),
+                                    );
+                                });
+                            });
+                        });
 
+                    ui.add_space(6.0);
+
+                    // ===== Scrollable channel list =====
+                    let footer_height = 48.0;
+                    let max_scroll_height = (ui.available_height() - footer_height).max(0.0);
+
+                    egui::ScrollArea::vertical()
+                        .auto_shrink(false)
+                        .drag_to_scroll(false)
+                        .max_height(max_scroll_height)
+                        .show(ui, |ui| {
                             if self.global_list.channels.is_empty() {
+                                ui.add_space(20.0);
                                 ui.vertical_centered(|ui| {
-                                    ui.add_space(20.0);
                                     ui.label(
                                         RichText::new("No active channels")
-                                            .color(Color32::GRAY)
-                                            .italics(),
+                                            .italics()
+                                            .color(Color32::GRAY),
                                     );
-                                    ui.add_space(20.0);
                                 });
-                            } else {
-                                for channel in &self.global_list.channels {
-                                    let is_current_channel =
-                                        channel.channel_id == self.current_channel_id;
+                                ui.add_space(20.0);
+                            }
 
-                                    let header = if is_current_channel {
-                                        RichText::new(format!("📢 {}", channel.name))
-                                            .color(Color32::LIGHT_GREEN)
-                                            .strong()
-                                    } else {
-                                        RichText::new(format!("🔈 {}", channel.name))
-                                            .color(Color32::LIGHT_BLUE)
-                                    };
+                            for channel in &self.global_list.channels {
+                                let is_current = channel.channel_id == self.current_channel_id;
+                                let total_in_channel =
+                                    channel.unmasked_count as usize + channel.masked_users.len();
 
-                                    let total_in_channel = channel.unmasked_count as usize
-                                        + channel.masked_users.len();
+                                let bg = if is_current {
+                                    Color32::from_rgb(30, 45, 35)
+                                } else {
+                                    ui.style().visuals.extreme_bg_color
+                                };
 
-                                    let response = ui.collapsing(header, |ui| {
+                                // ===== Channel Card =====
+                                let response = egui::Frame::none()
+                                    .fill(bg)
+                                    .rounding(10.0)
+                                    .inner_margin(egui::Margin::symmetric(10.0, 8.0))
+                                    .show(ui, |ui| {
+                                        // ----- Header -----
                                         ui.horizontal(|ui| {
-                                            ui.label(RichText::new("👤").small());
-                                            ui.label(format!("{} users", total_in_channel));
-                                            if channel.unmasked_count > 0 {
-                                                ui.label(RichText::new("•").color(Color32::GRAY));
-                                                ui.label(
-                                                    RichText::new(format!(
-                                                        "{} unmasked",
-                                                        channel.unmasked_count
-                                                    ))
-                                                    .color(Color32::YELLOW),
-                                                );
-                                            }
+                                            ui.label(
+                                                RichText::new(format!("#{}", channel.name))
+                                                    .strong()
+                                                    .size(15.0)
+                                                    .monospace()
+                                                    .color(if is_current {
+                                                        Color32::LIGHT_GREEN
+                                                    } else {
+                                                        Color32::WHITE
+                                                    }),
+                                            );
+
+                                            ui.with_layout(
+                                                egui::Layout::right_to_left(egui::Align::Center),
+                                                |ui| {
+                                                    badge(
+                                                        ui,
+                                                        format!("{total_in_channel} users"),
+                                                        Color32::GRAY,
+                                                    );
+
+                                                    if channel.unmasked_count > 0 {
+                                                        badge(
+                                                            ui,
+                                                            format!(
+                                                                "{} unmasked",
+                                                                channel.unmasked_count
+                                                            ),
+                                                            Color32::YELLOW,
+                                                        );
+                                                    }
+                                                },
+                                            );
                                         });
 
+                                        ui.add_space(4.0);
                                         ui.separator();
+                                        ui.add_space(4.0);
 
+                                        // ----- Users -----
                                         if channel.masked_users.is_empty() {
                                             ui.label(
                                                 RichText::new("No masked users")
-                                                    .color(Color32::GRAY)
-                                                    .small(),
+                                                    .small()
+                                                    .color(Color32::GRAY),
                                             );
                                         } else {
                                             for (name, muted, deafened) in &channel.masked_users {
                                                 ui.horizontal(|ui| {
-                                                    // Status indicator
                                                     let status_color = match (*muted, *deafened) {
                                                         (true, true) => Color32::RED,
-                                                        (true, false) => Color32::BLUE,
+                                                        (true, false) => {
+                                                            Color32::from_rgb(100, 150, 255)
+                                                        }
                                                         (false, true) => Color32::YELLOW,
                                                         (false, false) => Color32::GREEN,
                                                     };
-                                                    ui.label(
-                                                        RichText::new("•").color(status_color),
-                                                    );
 
-                                                    // Name
+                                                    ui.label(
+                                                        RichText::new("•")
+                                                            .size(15.0)
+                                                            .color(status_color),
+                                                    );
                                                     ui.label(
                                                         RichText::new(name)
-                                                            .color(Color32::GRAY)
-                                                            .strong(),
+                                                            .strong()
+                                                            .color(Color32::GRAY),
                                                     );
 
-                                                    // Status icons
-                                                    if *muted {
-                                                        ui.label(
-                                                            RichText::new("muted").small_raised(),
-                                                        );
-                                                    }
-                                                    if *deafened {
-                                                        ui.label(
-                                                            RichText::new("deafened")
-                                                                .small_raised(),
-                                                        );
-                                                    }
+                                                    ui.with_layout(
+                                                        egui::Layout::right_to_left(
+                                                            egui::Align::Center,
+                                                        ),
+                                                        |ui| {
+                                                            if *deafened {
+                                                                badge(
+                                                                    ui,
+                                                                    "deafened",
+                                                                    Color32::YELLOW,
+                                                                );
+                                                            }
+                                                            if *muted {
+                                                                badge(
+                                                                    ui,
+                                                                    "muted",
+                                                                    Color32::from_rgb(
+                                                                        120, 160, 255,
+                                                                    ),
+                                                                );
+                                                            }
+                                                        },
+                                                    );
                                                 });
                                             }
                                         }
+                                    })
+                                    .response;
 
-                                        if !is_current_channel {
-                                            ui.button("Join").clicked().then(|| {
-                                                self.join_channel(channel.channel_id);
-                                            });
-                                        }
-                                    });
-
-                                    if is_current_channel {
-                                        ui.painter().rect_stroke(
-                                            response.header_response.rect.expand(2.0),
-                                            4.0,
-                                            egui::Stroke::new(1.0, Color32::LIGHT_GREEN),
-                                        );
-                                    }
+                                // ===== Make the entire card clickable =====
+                                if !is_current && response.clicked() {
+                                    self.join_channel(channel.channel_id);
                                 }
-                            }
 
-                            ui.add_space(10.0);
+                                // ===== Context menu =====
+                                response.context_menu(|ui| {
+                                    if !is_current && ui.button("Join channel").clicked() {
+                                        self.join_channel(channel.channel_id);
+                                        ui.close_menu();
+                                    }
 
-                            if self.ping != u16::MAX {
-                                ui.horizontal(|ui| {
-                                    ui.label(RichText::new("📡").size(14.0));
-                                    ui.label("Ping: ");
-
-                                    let ping = self.ping;
-                                    let color = if ping < 125 {
-                                        Color32::LIGHT_GREEN
-                                    } else if ping < 250 {
-                                        Color32::YELLOW
-                                    } else {
-                                        Color32::RED
-                                    };
-
-                                    ui.label(RichText::new(format!("{ping}ms")).color(color));
+                                    if ui.button("Copy channel name").clicked() {
+                                        ui.output_mut(|o| o.copied_text = channel.name.clone());
+                                        ui.close_menu();
+                                    }
                                 });
+
+                                ui.add_space(4.0);
                             }
                         });
+
+                    // ===== Footer (Ping) =====
+                    ui.separator();
+                    ui.add_space(4.0);
+
+                    if self.ping != u16::MAX {
+                        let color = match self.ping {
+                            p if p < 125 => Color32::LIGHT_GREEN,
+                            p if p < 250 => Color32::YELLOW,
+                            _ => Color32::RED,
+                        };
+
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new("Ping").small().color(Color32::GRAY));
+                            ui.label(
+                                RichText::new(format!("{} ms", self.ping))
+                                    .strong()
+                                    .color(color),
+                            );
+                        });
+                    }
                 });
 
             egui::CentralPanel::default().show(ctx, |ui| {
@@ -510,9 +579,9 @@ impl eframe::App for GuiClientApp {
                             client.lock().unwrap().set_muted(self.muted);
                         }
                         if self.muted {
-                            self.write_log("Microphone muted".into(), Color32::RED);
+                            self.write_log("[Microphone] muted".into(), Color32::RED);
                         } else {
-                            self.write_log("Microphone unmuted".into(), Color32::LIGHT_GREEN);
+                            self.write_log("[Microphone] unmuted".into(), Color32::LIGHT_GREEN);
                         }
                     }
 
@@ -529,9 +598,9 @@ impl eframe::App for GuiClientApp {
                             client.lock().unwrap().set_deafened(self.deafened);
                         }
                         if self.deafened {
-                            self.write_log("Speaker deafened".into(), Color32::RED);
+                            self.write_log("[Speaker] deafened".into(), Color32::RED);
                         } else {
-                            self.write_log("Speaker undeafened".into(), Color32::LIGHT_GREEN);
+                            self.write_log("[Speaker] undeafened".into(), Color32::LIGHT_GREEN);
                         }
                     }
 
@@ -541,7 +610,7 @@ impl eframe::App for GuiClientApp {
 
                     if ui.button("Clear Logs").clicked() {
                         self.logs.write().unwrap().clear();
-                        self.write_log("Cleared logs".into(), Color32::LIGHT_BLUE);
+                        self.write_log("Cleared logs".into(), Color32::LIGHT_GREEN);
                     }
                 });
 
@@ -566,7 +635,8 @@ impl eframe::App for GuiClientApp {
                             let is_self = *color == Color32::LIGHT_BLUE || *color == Color32::BLUE;
                             let is_system = *color == Color32::GRAY
                                 || *color == Color32::YELLOW
-                                || *color == Color32::LIGHT_GREEN;
+                                || *color == Color32::LIGHT_GREEN
+                                || *color == Color32::RED;
 
                             if is_system {
                                 if let Some((src, content)) = parse_system_message(msg) {
@@ -617,7 +687,7 @@ impl eframe::App for GuiClientApp {
                                 };
 
                                 // Channel label (above bubble)
-                                let channel_label = format!("{}", name);
+                                let channel_label = format!("{} ", name);
                                 if is_self {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::TOP),
@@ -626,7 +696,7 @@ impl eframe::App for GuiClientApp {
                                             ui.label(
                                                 egui::RichText::new(channel_label)
                                                     .color(Color32::LIGHT_YELLOW)
-                                                    .size(13.0)
+                                                    .size(13.0),
                                             );
                                             ui.add_space(4.0);
                                         },
@@ -637,8 +707,7 @@ impl eframe::App for GuiClientApp {
                                         ui.label(
                                             egui::RichText::new(channel_label)
                                                 .color(Color32::from_rgb(150, 150, 150))
-                                                .size(11.0)
-                                                .monospace(),
+                                                .size(13.0),
                                         );
                                         ui.add_space(4.0);
                                     });
@@ -649,22 +718,12 @@ impl eframe::App for GuiClientApp {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::TOP),
                                         |ui| {
-                                            bubble_ui(
-                                                ui,
-                                                &content,
-                                                time,
-                                                text_color,
-                                            );
+                                            bubble_ui(ui, &content, time, text_color);
                                         },
                                     );
                                 } else {
                                     ui.horizontal(|ui| {
-                                        bubble_ui(
-                                            ui,
-                                            &content,
-                                            time,
-                                            text_color,
-                                        );
+                                        bubble_ui(ui, &content, time, text_color);
                                     });
                                 }
 

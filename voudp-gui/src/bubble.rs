@@ -28,9 +28,9 @@ pub fn bubble_ui(
     text_color: egui::Color32,
 ) {
     let bubble_color = if text_color == egui::Color32::WHITE {
-        egui::Color32::from_rgb(0, 120, 215) // blue for self
+        egui::Color32::from_rgb(0, 122, 255) // blue for self
     } else {
-        egui::Color32::from_rgb(240, 240, 240) // gray for others
+        egui::Color32::from_rgb(52, 199, 89) // gray for others
     };
 
     egui::Frame::none()
@@ -57,7 +57,21 @@ pub fn bubble_ui(
         });
 }
 
+pub fn badge(ui: &mut egui::Ui, text: impl Into<String>, color: egui::Color32) {
+    let text = egui::RichText::new(text.into())
+        .color(color)
+        .small()
+        .strong();
+
+    egui::Frame::none()
+        .fill(color.gamma_multiply(0.15))
+        .rounding(6.0)
+        .inner_margin(egui::Margin::symmetric(6.0, 2.0))
+        .show(ui, |ui| {
+            ui.label(text);
+        });
+}
+
 fn _name_color(_: &str) -> egui::Color32 {
     Color32::YELLOW
 }
-

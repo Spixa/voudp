@@ -383,13 +383,17 @@ impl ServerState {
 
         info!("{} has joined the channel with id {}", addr, chan_id);
 
-        self.dm(
-            addr,
-            format!(
-                "Welcome to this server. Server time is {}",
-                Local::now().format("%d/%m/%Y %H:%M:%S")
-            ),
-        );
+        if !self.remotes.contains_key(&addr) {
+            Self::dm(
+                &self.socket,
+                addr,
+                format!(
+                    "Welcome to this server. Server time is {}",
+                    Local::now().format("%d/%m/%Y %H:%M:%S")
+                ),
+            );
+        }
+
         let remote = self.remotes.entry(addr).or_insert_with(|| {
             info!("{} is a new remote", addr);
             Arc::new(Mutex::new(
@@ -397,11 +401,12 @@ impl ServerState {
             ))
         });
 
-        let old_channel_id = {
+        let (old_channel_id, mask) = {
             let mut remote_guard = remote.lock().unwrap();
             let old_id = remote_guard.channel_id;
+            let mask = remote_guard.mask.clone();
             remote_guard.channel_id = chan_id;
-            old_id
+            (old_id, mask)
         };
 
         if old_channel_id != chan_id
@@ -411,11 +416,22 @@ impl ServerState {
             old_channel.remove_remote(&addr);
         }
 
+        if let Some(mask) = mask {
+            self.broadcast_join(chan_id, mask);
+        }
         // add to new channel
         let channel = self
             .channels
             .entry(chan_id)
             .or_insert_with(|| Channel::new(self.config, format!("general-{chan_id}"), chan_id));
+
+        if let Some(channel_name) = &channel.name {
+            Self::dm(
+                &self.socket,
+                addr,
+                format!("You have been moved to #{channel_name}"),
+            );
+        }
 
         if let Some(remote) = self.remotes.get(&addr) {
             channel.add_remote(remote.clone());
@@ -471,7 +487,7 @@ impl ServerState {
 
     // TODO: announce old mask in join message incase of renicking
     fn handle_mask(&mut self, addr: SocketAddr, data: &[u8]) {
-        let (old_mask, new_mask, channel_id, peer_addresses) = {
+        let (old_mask, new_mask, channel_id) = {
             let Some(remote) = self.remotes.get(&addr) else {
                 warn!("Mask from unknown remote: {}, skipping request...", addr);
                 return;
@@ -497,18 +513,7 @@ impl ServerState {
 
             remote.lock().unwrap().mask = Some(new_mask.clone());
 
-            let peer_addresses: Vec<SocketAddr> =
-                if let Some(channel) = self.channels.get(&channel_id) {
-                    channel
-                        .remotes
-                        .iter()
-                        .map(|r| r.lock().unwrap().addr)
-                        .collect()
-                } else {
-                    Vec::new()
-                };
-
-            (old_mask, new_mask, channel_id, peer_addresses)
+            (old_mask, new_mask, channel_id)
         };
 
         info!(
@@ -516,26 +521,7 @@ impl ServerState {
             addr, new_mask, channel_id
         );
 
-        let packet = if let Some(old) = old_mask {
-            let mut packet = vec![0x10];
-            packet.push(old.len() as u8);
-            packet.extend_from_slice(old.as_bytes());
-
-            packet.push(new_mask.len() as u8);
-            packet.extend_from_slice(new_mask.as_bytes());
-
-            packet
-        } else {
-            let mut packet = vec![0x0a];
-            packet.extend_from_slice(new_mask.as_bytes());
-            packet
-        };
-
-        for peer_addr in peer_addresses {
-            if let Err(e) = self.socket.send_to(&packet, peer_addr) {
-                warn!("Failed to send mask packet to {}: {:?}", peer_addr, e);
-            }
-        }
+        self.broadcast_join_masked(channel_id, new_mask, old_mask);
     }
 
     fn handle_list(&mut self, addr: SocketAddr) {
@@ -671,7 +657,7 @@ impl ServerState {
     pub fn handle_ctrl(&mut self, addr: SocketAddr, data: &[u8]) {
         let Some(remote) = self.remotes.get(&addr) else {
             warn!(
-                "List request from unknown remote: {}, skipping request...",
+                "Control request from unknown remote: {}, skipping request...",
                 addr
             );
             return;
@@ -785,10 +771,10 @@ impl ServerState {
         let _ = self.socket.send_bad_packet_notice(addr);
     }
 
-    fn dm(&self, addr: SocketAddr, msg: String) {
+    fn dm(socket: &SecureUdpSocket, addr: SocketAddr, msg: String) {
         let mut packet = vec![0x11];
         packet.extend_from_slice(msg.as_bytes());
-        let _ = self.socket.send_to(&packet, addr);
+        let _ = socket.send_to(&packet, addr);
     }
 
     fn execute_command(
@@ -875,6 +861,49 @@ impl ServerState {
 
         for channel in self.channels.values_mut() {
             channel.mix(&self.socket);
+        }
+    }
+
+    fn broadcast_join(&mut self, channel_id: u32, mask: String) {
+        self.broadcast_join_masked(channel_id, mask, None);
+    }
+
+    fn broadcast_join_masked(
+        &mut self,
+        channel_id: u32,
+        new_mask: String,
+        old_mask: Option<String>,
+    ) {
+        let peer_addresses: Vec<SocketAddr> = if let Some(channel) = self.channels.get(&channel_id)
+        {
+            channel
+                .remotes
+                .iter()
+                .map(|r| r.lock().unwrap().addr)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let packet = if let Some(old) = old_mask {
+            let mut packet = vec![ClientPacketType::FlowRenick as u8];
+            packet.push(old.len() as u8);
+            packet.extend_from_slice(old.as_bytes());
+
+            packet.push(new_mask.len() as u8);
+            packet.extend_from_slice(new_mask.as_bytes());
+
+            packet
+        } else {
+            let mut packet = vec![ClientPacketType::FlowJoin as u8];
+            packet.extend_from_slice(new_mask.as_bytes());
+            packet
+        };
+
+        for peer_addr in peer_addresses {
+            if let Err(e) = self.socket.send_to(&packet, peer_addr) {
+                warn!("Failed to send mask packet to {}: {:?}", peer_addr, e);
+            }
         }
     }
 
