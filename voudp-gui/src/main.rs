@@ -4,7 +4,7 @@ use anyhow::Result;
 use chrono::{DateTime, Local};
 use core::f32;
 use eframe::{NativeOptions, egui};
-use egui::{Color32, Id, RichText};
+use egui::{Color32, Id, RichText, Stroke};
 
 use std::{
     fs::File,
@@ -201,98 +201,167 @@ impl eframe::App for GuiClientApp {
 
         if !self.is_connected {
             egui::CentralPanel::default().show(ctx, |ui| {
-                let available = ui.available_size();
-                ui.add_space(available.y * 0.2);
+    let available = ui.available_size();
+    ui.vertical_centered(|ui| {
+        ui.add_space(available.y * 0.15); // top padding
 
-                egui::Frame::group(ui.style()).show(ui, |ui| {
-                    ui.vertical_centered(|ui| {
-                        ui.heading(RichText::new("VoUDP GUI Client"));
-                        ui.add_space(10.0);
+        // ===== Main card =====
+        egui::Frame::none()
+            .fill(Color32::from_rgb(40, 45, 50)) // dark card
+            .stroke(egui::Stroke::new(1.0, Color32::from_gray(60))) // subtle border
+            .rounding(10.0)
+            .inner_margin(egui::Margin::symmetric(20.0, 20.0))
+            .show(ui, |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.heading(RichText::new("VoUDP GUI Client").size(24.0).strong());
+                    ui.add_space(15.0);
 
-                        ui.label("🔌 Server Address:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.address)
-                                .hint_text("server address (ip:port)"),
-                        );
+                    // ----- Server Address -----
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("🔌").size(18.0));
+                        ui.add_space(4.0);
 
-                        ui.label("🔑 Server password:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.phrase)
-                                .hint_text("usually \'voudp\'")
-                                .password(true),
-                        );
+                        let text_edit = egui::TextEdit::singleline(&mut self.address)
+                            .hint_text("server address (ip:port)")
+                            .desired_width(220.0)
+                            .frame(false); // disable default ugly frame
 
-                        ui.label("🔗 Channel ID:");
-                        ui.add(
-                            egui::TextEdit::singleline(&mut self.chan_id_text)
-                                .hint_text("ID")
-                                .char_limit(2)
-                                .desired_width(20.0),
-                        );
+                        egui::Frame::none()
+                            .fill(Color32::from_gray(30))
+                            .stroke(egui::Stroke::new(1.0, Color32::GRAY))
+                            .rounding(6.0)
+                            .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                            .show(ui, |ui| {
+                                ui.add(text_edit);
+                            });
+                    });
 
-                        ui.add_space(10.0);
+                    ui.add_space(8.0);
 
-                        if ui.button("🔗 Connect").clicked() {
-                            let chan_id = match self.chan_id_text.parse::<u32>() {
-                                Ok(num) => num,
-                                Err(_) => {
-                                    self.error.show = ShowMode::ShowError;
-                                    self.error.message = "Bad channel ID".into();
-                                    return;
-                                }
-                            };
+                    // ----- Server Password -----
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("🔑").size(18.0));
+                        ui.add_space(4.0);
 
-                            match ClientState::new(
-                                &self.address,
-                                chan_id,
-                                &self.phrase.clone().into_bytes(),
-                            ) {
-                                Ok(state) => {
-                                    self.socket = Some(state.socket.clone());
+                        let text_edit = egui::TextEdit::singleline(&mut self.phrase)
+                            .hint_text("usually 'voudp'")
+                            .password(true)
+                            .desired_width(220.0)
+                            .frame(false);
 
-                                    let arc_state = Arc::new(Mutex::new(state));
-                                    let thread_state = arc_state.clone();
+                        egui::Frame::none()
+                            .fill(Color32::from_gray(30))
+                            .stroke(egui::Stroke::new(1.0, Color32::GRAY))
+                            .rounding(6.0)
+                            .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                            .show(ui, |ui| {
+                                ui.add(text_edit);
+                            });
+                    });
 
-                                    let handle = std::thread::spawn(move || {
-                                        let _ = thread_state.lock().unwrap().run(client::Mode::Gui);
-                                    });
+                    ui.add_space(8.0);
 
-                                    self.client_thread = Some(handle);
-                                    self.client = Some(arc_state);
-                                    self.is_connected = true;
-                                }
-                                Err(e) => {
-                                    self.error.show = ShowMode::ShowError;
-                                    self.error.message =
-                                        format!("Failed to connect to the server: {}", e);
-                                }
+                    // ----- Channel ID -----
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new("🔗").size(18.0));
+                        ui.add_space(4.0);
+
+                        let text_edit = egui::TextEdit::singleline(&mut self.chan_id_text)
+                            .hint_text("ID")
+                            .char_limit(2)
+                            .desired_width(60.0)
+                            .frame(false);
+
+                        egui::Frame::none()
+                            .fill(Color32::from_gray(30))
+                            .stroke(egui::Stroke::new(1.0, Color32::GRAY))
+                            .rounding(6.0)
+                            .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                            .show(ui, |ui| {
+                                ui.add(text_edit);
+                            });
+                    });
+
+                    ui.add_space(15.0);
+
+                    // ----- Connect Button -----
+                    let connect_size = [150.0, 32.0];
+                    let connect_color = Color32::from_rgb(60, 120, 240); // clean blue
+                    if ui
+                        .add_sized(
+                            connect_size,
+                            egui::Button::new(RichText::new("Connect").strong().color(Color32::WHITE))
+                                .fill(connect_color)
+                                .stroke(egui::Stroke::new(1.0, Color32::BLACK))
+                                .rounding(6.0),
+                        )
+                        .clicked()
+                    {
+                        // ----- Connection logic -----
+                        let chan_id = match self.chan_id_text.parse::<u32>() {
+                            Ok(num) => num,
+                            Err(_) => {
+                                self.error.show = ShowMode::ShowError;
+                                self.error.message = "Bad channel ID".into();
+                                return;
                             }
-                            self.request_global_list();
+                        };
 
-                            let file = match File::create_new(".voudp") {
-                                Ok(file) => Some(file),
-                                Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                                    File::options()
-                                        .write(true)
-                                        .truncate(true)
-                                        .open(".voudp")
-                                        .ok()
-                                }
-                                Err(_) => None,
-                            };
+                        match ClientState::new(
+                            &self.address,
+                            chan_id,
+                            &self.phrase.clone().into_bytes(),
+                        ) {
+                            Ok(state) => {
+                                self.socket = Some(state.socket.clone());
+                                let arc_state = Arc::new(Mutex::new(state));
+                                let thread_state = arc_state.clone();
+                                let handle = std::thread::spawn(move || {
+                                    let _ = thread_state.lock().unwrap().run(client::Mode::Gui);
+                                });
 
-                            if let Some(mut file) = file {
-                                let _ = writeln!(
-                                    file,
-                                    "{} {} {}",
-                                    self.address, self.phrase, self.chan_id_text
-                                );
-                                let _ = file.flush();
+                                self.client_thread = Some(handle);
+                                self.client = Some(arc_state);
+                                self.is_connected = true;
+                            }
+                            Err(e) => {
+                                self.error.show = ShowMode::ShowError;
+                                self.error.message =
+                                    format!("Failed to connect to the server: {}", e);
                             }
                         }
-                    });
+
+                        self.request_global_list();
+
+                        let file = match File::create_new(".voudp") {
+                            Ok(file) => Some(file),
+                            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                                File::options()
+                                    .write(true)
+                                    .truncate(true)
+                                    .open(".voudp")
+                                    .ok()
+                            }
+                            Err(_) => None,
+                        };
+
+                        if let Some(mut file) = file {
+                            let _ = writeln!(
+                                file,
+                                "{} {} {}",
+                                self.address, self.phrase, self.chan_id_text
+                            );
+
+                            let _ = file.flush();
+                        }
+                    }
                 });
             });
+
+        ui.add_space(available.y * 0.15); // bottom padding
+    });
+});
+
         } else {
             self.update_global_list();
             self.update_command_list();
@@ -319,7 +388,7 @@ impl eframe::App for GuiClientApp {
                     ui.spacing_mut().item_spacing.y = 4.0;
 
                     // ===== Header =====
-                    ui.heading("Global Channels");
+                    ui.heading("Channels");
                     ui.add_space(4.0);
 
                     let total_users = self
@@ -328,10 +397,9 @@ impl eframe::App for GuiClientApp {
                         .iter()
                         .map(|c| c.unmasked_count as usize + c.masked_users.len())
                         .sum::<usize>();
-
                     let total_channels = self.global_list.channels.len();
 
-                    // ===== Compact stats =====
+                    // ===== Stats =====
                     egui::Frame::group(ui.style())
                         .rounding(8.0)
                         .inner_margin(egui::Margin::symmetric(8.0, 6.0))
@@ -360,12 +428,11 @@ impl eframe::App for GuiClientApp {
                     ui.add_space(6.0);
 
                     // ===== Scrollable channel list =====
-                    let footer_height = 48.0;
+                    let footer_height = 48.0; // just enough for emojis
                     let max_scroll_height = (ui.available_height() - footer_height).max(0.0);
 
                     egui::ScrollArea::vertical()
                         .auto_shrink(false)
-                        .drag_to_scroll(false)
                         .max_height(max_scroll_height)
                         .show(ui, |ui| {
                             if self.global_list.channels.is_empty() {
@@ -384,14 +451,12 @@ impl eframe::App for GuiClientApp {
                                 let is_current = channel.channel_id == self.current_channel_id;
                                 let total_in_channel =
                                     channel.unmasked_count as usize + channel.masked_users.len();
-
                                 let bg = if is_current {
                                     Color32::from_rgb(30, 45, 35)
                                 } else {
                                     ui.style().visuals.extreme_bg_color
                                 };
 
-                                // ===== Channel Card =====
                                 let response = egui::Frame::none()
                                     .fill(bg)
                                     .rounding(10.0)
@@ -419,7 +484,6 @@ impl eframe::App for GuiClientApp {
                                                         format!("{total_in_channel} users"),
                                                         Color32::GRAY,
                                                     );
-
                                                     if channel.unmasked_count > 0 {
                                                         badge(
                                                             ui,
@@ -456,7 +520,6 @@ impl eframe::App for GuiClientApp {
                                                         (false, true) => Color32::YELLOW,
                                                         (false, false) => Color32::GREEN,
                                                     };
-
                                                     ui.label(
                                                         RichText::new("•")
                                                             .size(15.0)
@@ -467,7 +530,6 @@ impl eframe::App for GuiClientApp {
                                                             .strong()
                                                             .color(Color32::GRAY),
                                                     );
-
                                                     ui.with_layout(
                                                         egui::Layout::right_to_left(
                                                             egui::Align::Center,
@@ -497,18 +559,17 @@ impl eframe::App for GuiClientApp {
                                     })
                                     .response;
 
-                                // ===== Make the entire card clickable =====
+                                // Make the entire card clickable
                                 if !is_current && response.clicked() {
                                     self.join_channel(channel.channel_id);
                                 }
 
-                                // ===== Context menu =====
+                                // Context menu
                                 response.context_menu(|ui| {
                                     if !is_current && ui.button("Join channel").clicked() {
                                         self.join_channel(channel.channel_id);
                                         ui.close_menu();
                                     }
-
                                     if ui.button("Copy channel name").clicked() {
                                         ui.output_mut(|o| o.copied_text = channel.name.clone());
                                         ui.close_menu();
@@ -519,32 +580,115 @@ impl eframe::App for GuiClientApp {
                             }
                         });
 
-                    // ===== Footer (Ping) =====
+                    // ===== Footer (Ping + text buttons) =====
+                    ui.add_space(2.0);
                     ui.separator();
-                    ui.add_space(4.0);
+                    ui.add_space(2.0);
 
-                    if self.ping != u16::MAX {
-                        let color = match self.ping {
-                            p if p < 125 => Color32::LIGHT_GREEN,
-                            p if p < 250 => Color32::YELLOW,
-                            _ => Color32::RED,
-                        };
-
-                        ui.horizontal(|ui| {
-                            ui.label(RichText::new("Ping").small().color(Color32::GRAY));
+                    ui.horizontal(|ui| {
+                        // ----- Ping -----
+                        if self.ping != u16::MAX {
+                            let color = match self.ping {
+                                p if p < 125 => Color32::LIGHT_GREEN,
+                                p if p < 250 => Color32::YELLOW,
+                                _ => Color32::RED,
+                            };
+                            ui.label(RichText::new("📡").size(18.0).color(color));
+                            ui.label(RichText::new("Ping: ").size(14.0).color(Color32::WHITE));
                             ui.label(
                                 RichText::new(format!("{} ms", self.ping))
-                                    .strong()
+                                    .size(14.0)
                                     .color(color),
                             );
+                        }
+
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            let btn_size = [60.0, 25.0]; // slightly smaller buttons
+
+                            // Deafen button
+                            let deaf_color = if self.deafened {
+                                Color32::from_rgb(60, 120, 240)
+                            } else {
+                                ui.visuals().widgets.inactive.bg_fill
+                            };
+                            if ui
+                                .add_sized(
+                                    btn_size,
+                                    egui::Button::new(RichText::new("Deafen").strong())
+                                        .fill(deaf_color)
+                                        .rounding(6.0),
+                                )
+                                .clicked()
+                            {
+                                self.deafened = !self.deafened;
+                                if let Some(client) = &self.client {
+                                    client.lock().unwrap().set_deafened(self.deafened);
+                                }
+                                if self.deafened {
+                                    self.write_log("[Speaker] deafened".into(), Color32::RED);
+                                } else {
+                                    self.write_log(
+                                        "[Speaker] undeafened".into(),
+                                        Color32::LIGHT_GREEN,
+                                    );
+                                }
+                            }
+
+                            ui.add_space(2.0); // small gap between buttons
+
+                            // Mute button
+                            let mute_color = if self.muted {
+                                Color32::from_rgb(60, 120, 240)
+                            } else {
+                                ui.visuals().widgets.inactive.bg_fill
+                            };
+                            if ui
+                                .add_sized(
+                                    btn_size,
+                                    egui::Button::new(RichText::new("Mute").strong())
+                                        .fill(mute_color)
+                                        .rounding(6.0),
+                                )
+                                .clicked()
+                            {
+                                self.muted = !self.muted;
+                                if let Some(client) = &self.client {
+                                    client.lock().unwrap().set_muted(self.muted);
+                                }
+                                if self.muted {
+                                    self.write_log("[Microphone] muted".into(), Color32::RED);
+                                } else {
+                                    self.write_log(
+                                        "[Microphone] unmuted".into(),
+                                        Color32::LIGHT_GREEN,
+                                    );
+                                }
+                            }
+                            ui.add_space(2.0);
+                            self.talking_indicator(ui);
                         });
-                    }
+                    });
                 });
 
             egui::CentralPanel::default().show(ctx, |ui| {
-                // Action buttons row
                 ui.horizontal(|ui| {
-                    if ui.button("❌ Disconnect").clicked() {
+                    let button_height = 32.0;
+                    let button_width = 100.0; // fixed width for uniformity
+                    let spacing = 6.0;
+
+                    ui.spacing_mut().item_spacing.x = spacing;
+
+                    // ----- Disconnect -----
+                    if ui
+                        .add_sized(
+                            [button_width, button_height],
+                            egui::Button::new(RichText::new("❌ Disconnect").strong())
+                                .fill(Color32::from_rgb(180, 60, 60))
+                                .stroke(egui::Stroke::new(1.0, Color32::BLACK))
+                                .rounding(6.0),
+                        )
+                        .clicked()
+                    {
                         if let Some(client) = &self.client {
                             client.lock().unwrap().disconnect();
                         }
@@ -552,10 +696,12 @@ impl eframe::App for GuiClientApp {
                         if let Some(handle) = self.client_thread.take() {
                             handle.join().ok();
                         }
+
                         self.is_connected = false;
                         self.nicked = false;
                         self.nick = String::new();
                         self.client = None;
+
                         self.write_log("Goodbye!".into(), Color32::GREEN);
                         self.write_log(
                             format!(
@@ -566,49 +712,31 @@ impl eframe::App for GuiClientApp {
                         );
                     }
 
+                    // ----- Renick -----
                     if ui
-                        .button(if self.muted {
-                            "🔈 Unmute"
-                        } else {
-                            "🔇 Mute"
-                        })
+                        .add_sized(
+                            [button_width, button_height],
+                            egui::Button::new(RichText::new("Renick").strong())
+                                .fill(Color32::from_rgb(80, 120, 180))
+                                .stroke(egui::Stroke::new(1.0, Color32::BLACK))
+                                .rounding(6.0),
+                        )
                         .clicked()
                     {
-                        self.muted = !self.muted;
-                        if let Some(client) = &self.client {
-                            client.lock().unwrap().set_muted(self.muted);
-                        }
-                        if self.muted {
-                            self.write_log("[Microphone] muted".into(), Color32::RED);
-                        } else {
-                            self.write_log("[Microphone] unmuted".into(), Color32::LIGHT_GREEN);
-                        }
-                    }
-
-                    if ui
-                        .button(if self.deafened {
-                            "🔈 Undeafen"
-                        } else {
-                            "🔇 Deafen"
-                        })
-                        .clicked()
-                    {
-                        self.deafened = !self.deafened;
-                        if let Some(client) = &self.client {
-                            client.lock().unwrap().set_deafened(self.deafened);
-                        }
-                        if self.deafened {
-                            self.write_log("[Speaker] deafened".into(), Color32::RED);
-                        } else {
-                            self.write_log("[Speaker] undeafened".into(), Color32::LIGHT_GREEN);
-                        }
-                    }
-
-                    if ui.button("Renick").clicked() {
                         self.error.show = ShowMode::ShowMaskScreen;
                     }
 
-                    if ui.button("Clear Logs").clicked() {
+                    // ----- Clear Logs -----
+                    if ui
+                        .add_sized(
+                            [button_width, button_height],
+                            egui::Button::new(RichText::new("Clear Logs").strong())
+                                .fill(Color32::from_rgb(100, 140, 100))
+                                .stroke(egui::Stroke::new(1.0, Color32::BLACK))
+                                .rounding(6.0),
+                        )
+                        .clicked()
+                    {
                         self.logs.write().unwrap().clear();
                         self.write_log("Cleared logs".into(), Color32::LIGHT_GREEN);
                     }
@@ -661,7 +789,6 @@ impl eframe::App for GuiClientApp {
                                         ui.add_space(4.0);
                                     });
                                 } else {
-                                    // Fallback: display raw system message as before
                                     ui.vertical_centered(|ui| {
                                         ui.add_space(2.0);
                                         ui.label(
@@ -681,12 +808,11 @@ impl eframe::App for GuiClientApp {
                             if let Some((_, name, content)) = parse_chat_message(msg) {
                                 // Colors
                                 let (_, text_color) = if is_self {
-                                    (Color32::from_rgb(0, 120, 215), Color32::WHITE) // blue bubble, white text
+                                    (Color32::from_rgb(0, 120, 215), Color32::WHITE)
                                 } else {
-                                    (Color32::from_rgb(240, 240, 240), Color32::BLACK) // light gray, black text
+                                    (Color32::from_rgb(240, 240, 240), Color32::BLACK)
                                 };
 
-                                // Channel label (above bubble)
                                 let channel_label = format!("{} ", name);
                                 if is_self {
                                     ui.with_layout(
@@ -759,10 +885,9 @@ impl eframe::App for GuiClientApp {
                     .show_inside(ui, |ui| {
                         let input_id = ui.make_persistent_id("chat_input");
 
+                        ui.add_space(2.0);
                         ui.horizontal(|ui| {
-                            self.talking_indicator(ui);
-
-                            let available_width = ui.available_width() - 115.0;
+                            let available_width = ui.available_width() - 80.0;
                             let text_edit = egui::TextEdit::singleline(&mut self.input)
                                 .hint_text("type your message/command...")
                                 .text_color(Color32::from_rgb(255, 215, 0));
@@ -781,15 +906,28 @@ impl eframe::App for GuiClientApp {
                                 }
                             }
 
-                            ui.add_sized([60.0, 24.0], egui::Button::new("Send"))
+                            let send_button_size = [70.0, 28.0]; // slightly smaller than input
+
+                            let send_color = { Color32::from_gray(70) };
+
+                            if ui
+                                .add_sized(
+                                    send_button_size,
+                                    egui::Button::new(
+                                        RichText::new("Send").strong().color(Color32::WHITE),
+                                    )
+                                    .fill(send_color)
+                                    .stroke(Stroke::new(1.0, Color32::BLACK))
+                                    .rounding(6.0),
+                                )
                                 .clicked()
-                                .then(|| {
-                                    if self.input.starts_with('/') {
-                                        self.execute_command();
-                                    } else {
-                                        self.send_message();
-                                    }
-                                });
+                            {
+                                if self.input.starts_with('/') {
+                                    self.execute_command();
+                                } else {
+                                    self.send_message();
+                                }
+                            }
 
                             if response.lost_focus()
                                 && ui.input(|i| i.key_pressed(egui::Key::Enter))
