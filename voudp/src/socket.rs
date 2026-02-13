@@ -7,7 +7,7 @@ use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, atomic::AtomicU32},
+    sync::{Arc, Mutex, atomic::{AtomicU32, AtomicU64}},
     time::{Duration, Instant},
 };
 use std::{
@@ -38,6 +38,8 @@ struct InnerSocket {
     cipher: ChaCha20Poly1305,
     seq_counter: AtomicU32,
     pending: Mutex<HashMap<u32, PendingPacket>>,
+    nonce_counter: AtomicU64,
+    nonce_prefix: [u8; 4],
     connected_addr: Mutex<Option<SocketAddr>>,
 }
 
@@ -52,12 +54,17 @@ impl SecureUdpSocket {
         socket.set_nonblocking(true)?;
         let cipher = ChaCha20Poly1305::new(&key);
 
+        let mut nonce_prefix = [0u8; 4];
+        OsRng.fill_bytes(&mut nonce_prefix);
+        
         Ok(Self {
             inner: Arc::new(InnerSocket {
                 socket,
                 cipher,
                 seq_counter: AtomicU32::new(1),
                 pending: Mutex::new(HashMap::new()),
+                nonce_counter: AtomicU64::new(0),
+                nonce_prefix,
                 connected_addr: Mutex::new(None),
             }),
         })
@@ -101,9 +108,14 @@ impl SecureUdpSocket {
     }
 
     pub fn send_to(&self, buf: &[u8], addr: SocketAddr) -> io::Result<usize> {
+
+        let counter = self.inner.nonce_counter.fetch_add(1, Ordering::Relaxed);
         let mut nonce_bytes = [0u8; 12];
-        OsRng.fill_bytes(&mut nonce_bytes);
+        nonce_bytes[..4].copy_from_slice(&self.inner.nonce_prefix);
+        nonce_bytes[4..].copy_from_slice(&counter.to_be_bytes()); // 8-byte counter
         let nonce = Nonce::from_slice(&nonce_bytes);
+
+
 
         let ciphertext = self
             .inner
