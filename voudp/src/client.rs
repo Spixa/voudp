@@ -63,7 +63,7 @@ type SafeCommandList = Arc<Mutex<Vec<ServerCommand>>>;
 impl ClientState {
     pub fn new(ip: &str, channel_id: u32, phrase: &[u8]) -> Result<Self, io::Error> {
         let key = socket::derive_key_from_phrase(phrase, protocol::VOUDP_SALT);
-        let mut socket = SecureUdpSocket::create("0.0.0.0:0".into(), key)?; // let OS decide port
+        let socket = SecureUdpSocket::create("0.0.0.0:0".into(), key)?; // let OS decide port
 
         socket.connect(ip)?;
 

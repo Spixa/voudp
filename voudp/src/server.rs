@@ -420,6 +420,7 @@ impl ServerState {
         if let Some(mask) = mask {
             self.broadcast_join(chan_id, mask);
         }
+
         // add to new channel
         let channel = self
             .channels
@@ -436,6 +437,7 @@ impl ServerState {
 
         if let Some(remote) = self.remotes.get(&addr) {
             channel.add_remote(remote.clone());
+            self.handle_list(addr);
         }
     }
 
@@ -525,7 +527,7 @@ impl ServerState {
         self.broadcast_join_masked(channel_id, new_mask, old_mask);
     }
 
-    fn handle_list(&mut self, addr: SocketAddr) {
+    fn handle_list(&self, addr: SocketAddr) {
         let Some(remote) = self.remotes.get(&addr) else {
             warn!(
                 "List request from unknown remote: {}, skipping request...",
@@ -769,7 +771,7 @@ impl ServerState {
 
     pub fn handle_bad(&mut self, addr: SocketAddr) {
         warn!("{addr} sent a bad packet");
-        let _ = self.socket.send_bad_packet_notice(addr);
+        // let _ = self.socket.send_bad_packet_notice(addr);
     }
 
     fn dm(socket: &SecureUdpSocket, addr: SocketAddr, msg: String) {
@@ -1011,6 +1013,7 @@ impl ServerState {
                     }
                     Err(ref e) if e.0.kind() == std::io::ErrorKind::WouldBlock => break,
                     Err(e) => {
+                        // TODO: drop packets from bad packet senders
                         self.handle_bad(e.1);
                         break;
                     }

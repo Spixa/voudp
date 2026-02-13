@@ -49,7 +49,7 @@ pub struct MusicClientState {
 impl MusicClientState {
     pub fn new(addr: &str, channel_id: u32, phrase: &[u8]) -> Result<Self> {
         let key = socket::derive_key_from_phrase(phrase, protocol::VOUDP_SALT);
-        let mut socket = SecureUdpSocket::create("0.0.0.0:0".into(), key)?;
+        let socket = SecureUdpSocket::create("0.0.0.0:0".into(), key)?;
         socket.connect(addr)?;
 
         Ok(Self {
