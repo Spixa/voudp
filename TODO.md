@@ -6,7 +6,6 @@
 * Do time-aligned mixing
 * Add deterministic clock
 
-
 ## Other high priority features after audio:
 * Implement the color command for selecting own color in chat
 * Add client-side noisegate feature 

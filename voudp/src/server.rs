@@ -308,7 +308,7 @@ impl ServerState {
                 "server received your empty message".into()
             };
 
-            if let Err(e) = self.socket.send_to(reply.as_bytes(), addr) {
+            if let Err(e) = self.socket.send_reliable(reply.as_bytes().to_vec(), addr) {
                 warn!("Could not reply back to console {addr} due to {e}");
             }
         } else {
@@ -474,7 +474,7 @@ impl ServerState {
                         for peer in &channel.remotes {
                             let peer_addr = { peer.lock().unwrap().addr };
 
-                            if let Err(e) = self.socket.send_to(&packet, peer_addr) {
+                            if let Err(e) = self.socket.send_reliable(packet.clone(), peer_addr) {
                                 warn!("Failed to send leave packet to {}: {:?}", peer_addr, e);
                             }
                         }
@@ -600,6 +600,7 @@ impl ServerState {
         }
 
         if let Err(e) = self.socket.send_to(&list_packet, addr) {
+            // i can get away with sending list unreliably
             warn!("Failed to send global list to {}: {}", addr, e);
         }
     }
@@ -644,14 +645,14 @@ impl ServerState {
                     msg_packet.push(is_self as u8);
                     msg_packet.extend_from_slice(data);
 
-                    let _ = self.socket.send_to(&msg_packet, addr);
+                    let _ = self.socket.send_reliable(msg_packet, addr);
                 }
 
                 info!("[#chan-{}] <{}> {}", chan_id, mask, msg);
             }
             None => {
                 let unauth_packet = vec![0x07];
-                let _ = self.socket.send_to(&unauth_packet, addr);
+                let _ = self.socket.send_reliable(unauth_packet, addr);
                 warn!("{addr} tried sending chat message without having a mask!");
             }
         }
@@ -708,12 +709,12 @@ impl ServerState {
             CommandResult::Success(msg) => {
                 let mut packet = vec![0x0e]; // command success response 
                 packet.extend_from_slice(msg.as_bytes());
-                let _ = self.socket.send_to(&packet, addr);
+                let _ = self.socket.send_reliable(packet, addr);
             }
             CommandResult::Error(msg) => {
                 let mut packet = vec![0x0f]; // command fail response 
                 packet.extend_from_slice(msg.as_bytes());
-                let _ = self.socket.send_to(&packet, addr);
+                let _ = self.socket.send_reliable(packet, addr);
             }
             CommandResult::Silent => {}
         };
@@ -764,7 +765,7 @@ impl ServerState {
             }
         }
 
-        if let Err(e) = self.socket.send_to(&packet, addr) {
+        if let Err(e) = self.socket.send_reliable(packet, addr) {
             warn!("Failed to send command sync to {}: {}", addr, e);
         }
     }
@@ -777,7 +778,7 @@ impl ServerState {
     fn dm(socket: &SecureUdpSocket, addr: SocketAddr, msg: String) {
         let mut packet = vec![0x11];
         packet.extend_from_slice(msg.as_bytes());
-        let _ = socket.send_to(&packet, addr);
+        let _ = socket.send_reliable(packet, addr);
     }
 
     fn execute_command(
@@ -904,7 +905,7 @@ impl ServerState {
         };
 
         for peer_addr in peer_addresses {
-            if let Err(e) = self.socket.send_to(&packet, peer_addr) {
+            if let Err(e) = self.socket.send_reliable(packet.clone(), peer_addr) {
                 warn!("Failed to send mask packet to {}: {:?}", peer_addr, e);
             }
         }
@@ -946,7 +947,7 @@ impl ServerState {
                         for peer in &channel.remotes {
                             let peer_addr = { peer.lock().unwrap().addr };
 
-                            if let Err(e) = self.socket.send_to(&packet, peer_addr) {
+                            if let Err(e) = self.socket.send_reliable(packet.clone(), peer_addr) {
                                 warn!("Failed to send leave packet to {}: {:?}", peer_addr, e);
                             }
                         }

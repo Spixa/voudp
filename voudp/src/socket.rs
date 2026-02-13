@@ -7,7 +7,10 @@ use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
 use std::{
     collections::HashMap,
-    sync::{Arc, Mutex, atomic::{AtomicU32, AtomicU64}},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicU32, AtomicU64},
+    },
     time::{Duration, Instant},
 };
 use std::{
@@ -56,7 +59,7 @@ impl SecureUdpSocket {
 
         let mut nonce_prefix = [0u8; 4];
         OsRng.fill_bytes(&mut nonce_prefix);
-        
+
         Ok(Self {
             inner: Arc::new(InnerSocket {
                 socket,
@@ -108,14 +111,11 @@ impl SecureUdpSocket {
     }
 
     pub fn send_to(&self, buf: &[u8], addr: SocketAddr) -> io::Result<usize> {
-
         let counter = self.inner.nonce_counter.fetch_add(1, Ordering::Relaxed);
         let mut nonce_bytes = [0u8; 12];
         nonce_bytes[..4].copy_from_slice(&self.inner.nonce_prefix);
         nonce_bytes[4..].copy_from_slice(&counter.to_be_bytes()); // 8-byte counter
         let nonce = Nonce::from_slice(&nonce_bytes);
-
-
 
         let ciphertext = self
             .inner
@@ -130,7 +130,7 @@ impl SecureUdpSocket {
         self.inner.socket.send_to(&packet, addr)
     }
 
-    fn send_reliable(&self, payload: Vec<u8>, addr: SocketAddr) -> io::Result<()> {
+    pub fn send_reliable(&self, payload: Vec<u8>, addr: SocketAddr) -> io::Result<()> {
         let seq = self.inner.seq_counter.fetch_add(1, Ordering::Relaxed);
         let mut packet = Vec::with_capacity(1 + 4 + payload.len());
         packet.push(RELIABLE_FLAG);
