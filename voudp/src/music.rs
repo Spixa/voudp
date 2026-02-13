@@ -28,7 +28,8 @@ use symphonia::{
 use crate::{
     client::Message,
     protocol::{self, ClientPacketType, PacketSerializer},
-    util::{self, SecureUdpSocket},
+    socket::{self, SecureUdpSocket},
+    util::{self},
 };
 
 const TARGET_SAMPLE_RATE: u32 = 48_000;
@@ -47,7 +48,7 @@ pub struct MusicClientState {
 
 impl MusicClientState {
     pub fn new(addr: &str, channel_id: u32, phrase: &[u8]) -> Result<Self> {
-        let key = util::derive_key_from_phrase(phrase, protocol::VOUDP_SALT);
+        let key = socket::derive_key_from_phrase(phrase, protocol::VOUDP_SALT);
         let mut socket = SecureUdpSocket::create("0.0.0.0:0".into(), key)?;
         socket.connect(addr)?;
 

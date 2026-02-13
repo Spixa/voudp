@@ -1,6 +1,6 @@
 // console_commands.rs
 use crate::server::{Channel, ServerConfig};
-use crate::util::SecureUdpSocket;
+use crate::socket::SecureUdpSocket;
 
 pub enum ConsoleCommandResult {
     Reply(String),

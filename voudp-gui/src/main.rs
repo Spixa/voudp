@@ -16,7 +16,8 @@ use std::{
 
 use voudp::{
     client::{self, ClientState, GlobalListState, Message},
-    util::{SecureUdpSocket, ServerCommand},
+    socket::SecureUdpSocket,
+    util::ServerCommand,
 };
 
 use crate::bubble::{badge, bubble_ui, parse_chat_message, parse_system_message};
@@ -201,167 +202,172 @@ impl eframe::App for GuiClientApp {
 
         if !self.is_connected {
             egui::CentralPanel::default().show(ctx, |ui| {
-    let available = ui.available_size();
-    ui.vertical_centered(|ui| {
-        ui.add_space(available.y * 0.15); // top padding
-
-        // ===== Main card =====
-        egui::Frame::none()
-            .fill(Color32::from_rgb(40, 45, 50)) // dark card
-            .stroke(egui::Stroke::new(1.0, Color32::from_gray(60))) // subtle border
-            .rounding(10.0)
-            .inner_margin(egui::Margin::symmetric(20.0, 20.0))
-            .show(ui, |ui| {
+                let available = ui.available_size();
                 ui.vertical_centered(|ui| {
-                    ui.heading(RichText::new("VoUDP GUI Client").size(24.0).strong());
-                    ui.add_space(15.0);
+                    ui.add_space(available.y * 0.15); // top padding
 
-                    // ----- Server Address -----
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("🔌").size(18.0));
-                        ui.add_space(4.0);
+                    // ===== Main card =====
+                    egui::Frame::none()
+                        .fill(Color32::from_rgb(40, 45, 50)) // dark card
+                        .stroke(egui::Stroke::new(1.0, Color32::from_gray(60))) // subtle border
+                        .rounding(10.0)
+                        .inner_margin(egui::Margin::symmetric(20.0, 20.0))
+                        .show(ui, |ui| {
+                            ui.vertical_centered(|ui| {
+                                ui.heading(RichText::new("VoUDP GUI Client").size(24.0).strong());
+                                ui.add_space(15.0);
 
-                        let text_edit = egui::TextEdit::singleline(&mut self.address)
-                            .hint_text("server address (ip:port)")
-                            .desired_width(220.0)
-                            .frame(false); // disable default ugly frame
+                                // ----- Server Address -----
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("🔌").size(18.0));
+                                    ui.add_space(4.0);
 
-                        egui::Frame::none()
-                            .fill(Color32::from_gray(30))
-                            .stroke(egui::Stroke::new(1.0, Color32::GRAY))
-                            .rounding(6.0)
-                            .inner_margin(egui::Margin::symmetric(6.0, 4.0))
-                            .show(ui, |ui| {
-                                ui.add(text_edit);
-                            });
-                    });
+                                    let text_edit = egui::TextEdit::singleline(&mut self.address)
+                                        .hint_text("server address (ip:port)")
+                                        .desired_width(220.0)
+                                        .frame(false); // disable default ugly frame
 
-                    ui.add_space(8.0);
-
-                    // ----- Server Password -----
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("🔑").size(18.0));
-                        ui.add_space(4.0);
-
-                        let text_edit = egui::TextEdit::singleline(&mut self.phrase)
-                            .hint_text("usually 'voudp'")
-                            .password(true)
-                            .desired_width(220.0)
-                            .frame(false);
-
-                        egui::Frame::none()
-                            .fill(Color32::from_gray(30))
-                            .stroke(egui::Stroke::new(1.0, Color32::GRAY))
-                            .rounding(6.0)
-                            .inner_margin(egui::Margin::symmetric(6.0, 4.0))
-                            .show(ui, |ui| {
-                                ui.add(text_edit);
-                            });
-                    });
-
-                    ui.add_space(8.0);
-
-                    // ----- Channel ID -----
-                    ui.horizontal(|ui| {
-                        ui.label(RichText::new("🔗").size(18.0));
-                        ui.add_space(4.0);
-
-                        let text_edit = egui::TextEdit::singleline(&mut self.chan_id_text)
-                            .hint_text("ID")
-                            .char_limit(2)
-                            .desired_width(60.0)
-                            .frame(false);
-
-                        egui::Frame::none()
-                            .fill(Color32::from_gray(30))
-                            .stroke(egui::Stroke::new(1.0, Color32::GRAY))
-                            .rounding(6.0)
-                            .inner_margin(egui::Margin::symmetric(6.0, 4.0))
-                            .show(ui, |ui| {
-                                ui.add(text_edit);
-                            });
-                    });
-
-                    ui.add_space(15.0);
-
-                    // ----- Connect Button -----
-                    let connect_size = [150.0, 32.0];
-                    let connect_color = Color32::from_rgb(60, 120, 240); // clean blue
-                    if ui
-                        .add_sized(
-                            connect_size,
-                            egui::Button::new(RichText::new("Connect").strong().color(Color32::WHITE))
-                                .fill(connect_color)
-                                .stroke(egui::Stroke::new(1.0, Color32::BLACK))
-                                .rounding(6.0),
-                        )
-                        .clicked()
-                    {
-                        // ----- Connection logic -----
-                        let chan_id = match self.chan_id_text.parse::<u32>() {
-                            Ok(num) => num,
-                            Err(_) => {
-                                self.error.show = ShowMode::ShowError;
-                                self.error.message = "Bad channel ID".into();
-                                return;
-                            }
-                        };
-
-                        match ClientState::new(
-                            &self.address,
-                            chan_id,
-                            &self.phrase.clone().into_bytes(),
-                        ) {
-                            Ok(state) => {
-                                self.socket = Some(state.socket.clone());
-                                let arc_state = Arc::new(Mutex::new(state));
-                                let thread_state = arc_state.clone();
-                                let handle = std::thread::spawn(move || {
-                                    let _ = thread_state.lock().unwrap().run(client::Mode::Gui);
+                                    egui::Frame::none()
+                                        .fill(Color32::from_gray(30))
+                                        .stroke(egui::Stroke::new(1.0, Color32::GRAY))
+                                        .rounding(6.0)
+                                        .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                                        .show(ui, |ui| {
+                                            ui.add(text_edit);
+                                        });
                                 });
 
-                                self.client_thread = Some(handle);
-                                self.client = Some(arc_state);
-                                self.is_connected = true;
-                            }
-                            Err(e) => {
-                                self.error.show = ShowMode::ShowError;
-                                self.error.message =
-                                    format!("Failed to connect to the server: {}", e);
-                            }
-                        }
+                                ui.add_space(8.0);
 
-                        self.request_global_list();
+                                // ----- Server Password -----
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("🔑").size(18.0));
+                                    ui.add_space(4.0);
 
-                        let file = match File::create_new(".voudp") {
-                            Ok(file) => Some(file),
-                            Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
-                                File::options()
-                                    .write(true)
-                                    .truncate(true)
-                                    .open(".voudp")
-                                    .ok()
-                            }
-                            Err(_) => None,
-                        };
+                                    let text_edit = egui::TextEdit::singleline(&mut self.phrase)
+                                        .hint_text("usually 'voudp'")
+                                        .password(true)
+                                        .desired_width(220.0)
+                                        .frame(false);
 
-                        if let Some(mut file) = file {
-                            let _ = writeln!(
-                                file,
-                                "{} {} {}",
-                                self.address, self.phrase, self.chan_id_text
-                            );
+                                    egui::Frame::none()
+                                        .fill(Color32::from_gray(30))
+                                        .stroke(egui::Stroke::new(1.0, Color32::GRAY))
+                                        .rounding(6.0)
+                                        .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                                        .show(ui, |ui| {
+                                            ui.add(text_edit);
+                                        });
+                                });
 
-                            let _ = file.flush();
-                        }
-                    }
+                                ui.add_space(8.0);
+
+                                // ----- Channel ID -----
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("🔗").size(18.0));
+                                    ui.add_space(4.0);
+
+                                    let text_edit =
+                                        egui::TextEdit::singleline(&mut self.chan_id_text)
+                                            .hint_text("ID")
+                                            .char_limit(2)
+                                            .desired_width(60.0)
+                                            .frame(false);
+
+                                    egui::Frame::none()
+                                        .fill(Color32::from_gray(30))
+                                        .stroke(egui::Stroke::new(1.0, Color32::GRAY))
+                                        .rounding(6.0)
+                                        .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                                        .show(ui, |ui| {
+                                            ui.add(text_edit);
+                                        });
+                                });
+
+                                ui.add_space(15.0);
+
+                                // ----- Connect Button -----
+                                let connect_size = [150.0, 32.0];
+                                let connect_color = Color32::from_rgb(60, 120, 240); // clean blue
+                                if ui
+                                    .add_sized(
+                                        connect_size,
+                                        egui::Button::new(
+                                            RichText::new("Connect").strong().color(Color32::WHITE),
+                                        )
+                                        .fill(connect_color)
+                                        .stroke(egui::Stroke::new(1.0, Color32::BLACK))
+                                        .rounding(6.0),
+                                    )
+                                    .clicked()
+                                {
+                                    // ----- Connection logic -----
+                                    let chan_id = match self.chan_id_text.parse::<u32>() {
+                                        Ok(num) => num,
+                                        Err(_) => {
+                                            self.error.show = ShowMode::ShowError;
+                                            self.error.message = "Bad channel ID".into();
+                                            return;
+                                        }
+                                    };
+
+                                    match ClientState::new(
+                                        &self.address,
+                                        chan_id,
+                                        &self.phrase.clone().into_bytes(),
+                                    ) {
+                                        Ok(state) => {
+                                            self.socket = Some(state.socket.clone());
+                                            let arc_state = Arc::new(Mutex::new(state));
+                                            let thread_state = arc_state.clone();
+                                            let handle = std::thread::spawn(move || {
+                                                let _ = thread_state
+                                                    .lock()
+                                                    .unwrap()
+                                                    .run(client::Mode::Gui);
+                                            });
+
+                                            self.client_thread = Some(handle);
+                                            self.client = Some(arc_state);
+                                            self.is_connected = true;
+                                        }
+                                        Err(e) => {
+                                            self.error.show = ShowMode::ShowError;
+                                            self.error.message =
+                                                format!("Failed to connect to the server: {}", e);
+                                        }
+                                    }
+
+                                    self.request_global_list();
+
+                                    let file = match File::create_new(".voudp") {
+                                        Ok(file) => Some(file),
+                                        Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
+                                            File::options()
+                                                .write(true)
+                                                .truncate(true)
+                                                .open(".voudp")
+                                                .ok()
+                                        }
+                                        Err(_) => None,
+                                    };
+
+                                    if let Some(mut file) = file {
+                                        let _ = writeln!(
+                                            file,
+                                            "{} {} {}",
+                                            self.address, self.phrase, self.chan_id_text
+                                        );
+
+                                        let _ = file.flush();
+                                    }
+                                }
+                            });
+                        });
+
+                    ui.add_space(available.y * 0.15); // bottom padding
                 });
             });
-
-        ui.add_space(available.y * 0.15); // bottom padding
-    });
-});
-
         } else {
             self.update_global_list();
             self.update_command_list();

@@ -16,8 +16,9 @@ use crossterm::{
     },
 };
 
-use voudp::protocol::VOUDP_SALT;
-use voudp::util::{self, SecureUdpSocket};
+use voudp::socket::SecureUdpSocket;
+use voudp::util::{self};
+use voudp::{protocol::VOUDP_SALT, socket};
 
 enum LogMsg {
     Line(String),
@@ -117,7 +118,7 @@ fn main() -> Result<(), std::io::Error> {
 
     println!("Generating key...");
 
-    let key = util::derive_key_from_phrase(phrase.as_bytes(), VOUDP_SALT);
+    let key = socket::derive_key_from_phrase(phrase.as_bytes(), VOUDP_SALT);
     let socket = SecureUdpSocket::create("0.0.0.0:0".to_owned(), key)?;
     // socket.connect(ip.clone())?;
 

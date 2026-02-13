@@ -34,6 +34,22 @@ pub enum ClientPacketType {
     RegisterConsole = 0xff,
 }
 
+impl ClientPacketType {
+    pub fn is_reliable(self) -> bool {
+        matches!(
+            self,
+            ClientPacketType::Join
+                | ClientPacketType::Ctrl
+                | ClientPacketType::FlowJoin
+                | ClientPacketType::FlowLeave
+                | ClientPacketType::FlowRenick
+                | ClientPacketType::Cmd
+                | ClientPacketType::CommandResponse
+                | ClientPacketType::RegisterConsole
+        )
+    }
+}
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConsolePacketType {

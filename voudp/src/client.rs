@@ -11,7 +11,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use crate::protocol::{self, ClientPacketType};
-use crate::util::{self, ChannelInfo, SecureUdpSocket, ServerCommand};
+use crate::socket::{self, SecureUdpSocket};
+use crate::util::{self, ChannelInfo, ServerCommand};
 
 const TARGET_FRAME_SIZE: usize = 960; // 20ms at 48kHz
 const BUFFER_CAPACITY: usize = TARGET_FRAME_SIZE * 10; // 10 frames
@@ -61,7 +62,7 @@ type SafeCommandList = Arc<Mutex<Vec<ServerCommand>>>;
 
 impl ClientState {
     pub fn new(ip: &str, channel_id: u32, phrase: &[u8]) -> Result<Self, io::Error> {
-        let key = util::derive_key_from_phrase(phrase, protocol::VOUDP_SALT);
+        let key = socket::derive_key_from_phrase(phrase, protocol::VOUDP_SALT);
         let mut socket = SecureUdpSocket::create("0.0.0.0:0".into(), key)?; // let OS decide port
 
         socket.connect(ip)?;

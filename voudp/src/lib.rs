@@ -5,4 +5,5 @@ pub mod mixer;
 pub mod music;
 pub mod protocol;
 pub mod server;
+pub mod socket;
 pub mod util;

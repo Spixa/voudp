@@ -18,7 +18,8 @@ use crate::{
     console_cmd::{ConsoleCommandResult, handle_command},
     mixer,
     protocol::{self, ClientPacketType, ConsolePacketType, ControlRequest, PASSWORD},
-    util::{self, CommandCategory, CommandContext, CommandResult, SecureUdpSocket},
+    socket::{self, SecureUdpSocket},
+    util::{self, CommandCategory, CommandContext, CommandResult},
 };
 const JITTER_BUFFER_LEN: usize = 50;
 
@@ -254,7 +255,7 @@ pub struct ServerState {
 impl ServerState {
     pub fn new(config: ServerConfig, phrase: &[u8]) -> Result<Self, io::Error> {
         info!("Deriving key from phrase...");
-        let key = util::derive_key_from_phrase(phrase, protocol::VOUDP_SALT);
+        let key = socket::derive_key_from_phrase(phrase, protocol::VOUDP_SALT);
         let socket = SecureUdpSocket::create(format!("0.0.0.0:{}", config.bind_port), key)?;
 
         info!("Bound to 0.0.0.0:{}", config.bind_port);
