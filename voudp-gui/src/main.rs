@@ -857,6 +857,7 @@ impl eframe::App for GuiClientApp {
                                     ui.vertical_centered(|ui| {
                                         ui.add_space(4.0);
 
+                                        ui.style_mut().wrap = Some(true);
                                         ui.label(
                                             egui::RichText::new(src)
                                                 .color(*color)
@@ -871,6 +872,7 @@ impl eframe::App for GuiClientApp {
                                                 .size(12.0)
                                                 .italics(),
                                         );
+                                        ui.style_mut().wrap = None;
 
                                         ui.add_space(4.0);
                                     });
@@ -1110,14 +1112,14 @@ impl eframe::App for GuiClientApp {
                         match result {
                             Cr::Success(content) => {
                                 self.logs.write().unwrap().push((
-                                    format!("[Command Result] {content}"),
+                                    format!("[Command Success] {content}"),
                                     Color32::LIGHT_GREEN,
                                     time,
                                 ));
                             }
                             Cr::Error(content) => {
                                 self.logs.write().unwrap().push((
-                                    format!("[Command Result] {content}"),
+                                    format!("[Command Fail] {content}"),
                                     Color32::LIGHT_RED,
                                     time,
                                 ));

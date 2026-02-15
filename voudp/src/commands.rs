@@ -42,6 +42,7 @@ impl CommandSystem {
                 }
             },
         );
+
         //     // User commands
         //     self.register_command(ServerCommand {
         //         name: "/nick".to_string(),

@@ -19,17 +19,17 @@ use crate::{
     mixer,
     protocol::{self, ClientPacketType, ConsolePacketType, ControlRequest, IntoPacket, PASSWORD},
     socket::{self, SecureUdpSocket},
-    util::{self, CommandCategory, CommandContext, CommandResult},
+    util::{self, CommandCategory, CommandContext, CommandResult, ServerCommand},
 };
 const JITTER_BUFFER_LEN: usize = 50;
 
-#[derive(Clone, Copy, PartialEq)]
+#[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Clipping {
     Soft,
     Hard,
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub struct ServerConfig {
     pub max_users: usize,
     pub should_normalize: bool,
@@ -270,6 +270,26 @@ impl ServerState {
         default_channels.insert(2, Channel::new(config, String::from("music"), 2));
         default_channels.insert(3, Channel::new(config, String::from("test"), 3));
 
+        let mut command_system = CommandSystem::new();
+
+
+        let config_clone = config.clone();
+        command_system.register_command(
+            ServerCommand {
+                name: "/info".into(),
+                description: "Dump server config".into(),
+                usage: "/info <mask>".into(),
+                category: CommandCategory::Admin,
+                aliases: vec![],
+                requires_auth: false,
+                admin_only: false,
+            },
+            move |_| {
+                CommandResult::Success(format!("{:#?}", config_clone))
+            },
+        );
+
+        
         Ok(Self {
             socket: Arc::clone(&socket),
             remotes: HashMap::new(),
@@ -277,7 +297,7 @@ impl ServerState {
             channels: default_channels,
             audio_rb: HeapRb::new(config.max_users),
             config,
-            command_system: CommandSystem::new(),
+            command_system,
         })
     }
 
