@@ -257,7 +257,12 @@ impl eframe::App for GuiClientApp {
                                     self.error.show = ShowMode::DontShow;
                                     self.nicked = true;
                                     self.set_nick();
-                                    self.send_message();
+
+                                    if self.input.starts_with("/") {
+                                        self.execute_command();
+                                    } else {
+                                        self.send_message();
+                                    }
                                 }
                             },
                         );
@@ -1243,95 +1248,69 @@ impl GuiClientApp {
             return false;
         }
 
-        // Store filter text and selection before any borrowing
         let filter_text = self.filter_text.clone();
-        let current_selection = self.selected_suggestion;
-
-        // Calculate filtered count WITHOUT borrowing self
-        let filtered_count = self
+        let filtered_commands: Vec<&ServerCommand> = self
             .command_list
             .iter()
             .filter(|cmd| {
                 let name_match = cmd.name[1..]
                     .to_lowercase()
                     .starts_with(&filter_text.to_lowercase());
+
                 let alias_match = cmd.aliases.iter().any(|alias| {
                     alias[1..]
                         .to_lowercase()
                         .starts_with(&filter_text.to_lowercase())
                 });
+
                 name_match || alias_match
             })
-            .count();
+            .collect();
 
+        let filtered_count = filtered_commands.len();
         if filtered_count == 0 {
             return false;
         }
 
         let mut handled = false;
 
-        // Handle arrow down
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowDown)) {
-            self.selected_suggestion = (current_selection + 1) % filtered_count;
+            self.selected_suggestion = (self.selected_suggestion + 1) % filtered_count;
             handled = true;
         }
 
-        // Handle arrow up
         if ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)) {
-            if current_selection == 0 {
+            if self.selected_suggestion == 0 {
                 self.selected_suggestion = filtered_count - 1;
             } else {
-                self.selected_suggestion = current_selection - 1;
+                self.selected_suggestion -= 1;
             }
             handled = true;
         }
 
-        // Handle Enter key - need to get the actual command now
-        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) && filtered_count > 0 {
-            // Get filtered commands AFTER we've updated selected_suggestion if needed
-            let filtered_commands: Vec<&ServerCommand> = self
-                .command_list
-                .iter()
-                .filter(|cmd| {
-                    let name_match = cmd.name[1..]
-                        .to_lowercase()
-                        .starts_with(&filter_text.to_lowercase());
-                    let alias_match = cmd.aliases.iter().any(|alias| {
-                        alias[1..]
-                            .to_lowercase()
-                            .starts_with(&filter_text.to_lowercase())
-                    });
-                    name_match || alias_match
-                })
-                .collect();
-
-            // Use the current selection (which might have been updated by arrow keys)
-            let selection_to_use = if handled
-                && (ctx.input(|i| i.key_pressed(egui::Key::ArrowDown))
-                    || ctx.input(|i| i.key_pressed(egui::Key::ArrowUp)))
-            {
-                self.selected_suggestion
-            } else {
-                current_selection
-            };
-
-            if let Some(command) = filtered_commands.get(selection_to_use) {
+        // enter -> first copies, second executes
+        if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
+            if let Some(command) = filtered_commands.get(self.selected_suggestion) {
                 let requires_auth_warning = command.requires_auth && !self.nicked;
 
                 if requires_auth_warning {
                     self.error.show = ShowMode::ShowMaskScreen;
                     self.error.message = "You need to set a nickname first!".to_string();
+                } else if self.input == command.name {
+                    // second enter -> execute
+                    self.execute_command();
                 } else {
-                    self.input = format!("{} ", command.name);
+                    // first enter -> copy command to input
+                    self.input = command.name.clone();
                 }
 
                 self.show_command_suggestions = false;
                 ctx.memory_mut(|mem| mem.request_focus(input_id));
             }
+
             handled = true;
         }
 
-        // Escape key closes suggestions
         if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
             self.show_command_suggestions = false;
             ctx.memory_mut(|mem| mem.request_focus(input_id));

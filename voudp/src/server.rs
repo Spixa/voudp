@@ -788,8 +788,8 @@ impl ServerState {
         channel_id: u32,
         is_admin: bool,
     ) -> CommandResult {
-        let (command, args) = match self.command_system.parse_command(input) {
-            Some((cmd, args)) => (cmd, args),
+        let (command, _, args) = match self.command_system.parse_command(input) {
+            Some((cmd, fun, args)) => (cmd, fun, args),
             None => {
                 return CommandResult::Error(
                     "Unknown command. Type /help for available commands.".to_string(),
@@ -807,7 +807,7 @@ impl ServerState {
             );
         }
 
-        let _context = CommandContext {
+        let context = CommandContext {
             sender_addr,
             sender_mask: sender_mask.map(|s| s.to_string()),
             channel_id,
@@ -815,15 +815,12 @@ impl ServerState {
             is_admin,
         };
 
-        match command.name.as_str() {
-            "/nick" => {
-                return CommandResult::Success("Nick".into());
-            }
-            "/other" => {}
-            _ => {}
+        let cmd_name = &command.name;
+        if let Some((_, func)) = self.command_system.get_command(&cmd_name) {
+            func(&context)
+        } else {
+            CommandResult::Silent
         }
-
-        CommandResult::Silent
     }
 
     fn process_audio_tick(&mut self) {
