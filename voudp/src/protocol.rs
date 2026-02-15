@@ -13,6 +13,7 @@ pub const ACK_FLAG: u8 = 0x81;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientPacketType {
+    // Handshake = 0x00,
     Join = 0x01,
     Audio = 0x02,
     Eof = 0x03,

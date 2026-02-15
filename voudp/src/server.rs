@@ -765,7 +765,8 @@ impl ServerState {
             }
         }
 
-        if let Err(e) = self.socket.send_to(&packet, addr) { // no need for reliable command syncing
+        if let Err(e) = self.socket.send_to(&packet, addr) {
+            // no need for reliable command syncing
             warn!("Failed to send command sync to {}: {}", addr, e);
         }
     }

@@ -65,7 +65,7 @@ struct GuiClientApp {
     ping: u16,
 }
 
-#[derive(Default)]
+#[derive(Default, PartialEq, Eq)]
 enum ShowMode {
     #[default]
     DontShow,
@@ -148,56 +148,143 @@ impl Default for GuiClientApp {
 }
 impl eframe::App for GuiClientApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        // Connection error popup
         match self.error.show {
             ShowMode::ShowError => {
-                egui::Window::new(RichText::new("Connection Error").color(Color32::WHITE))
+                egui::Window::new("Connection Error")
                     .collapsible(false)
                     .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, -50.0])
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, -40.0])
+                    .frame(
+                        egui::Frame::none()
+                            .fill(ctx.style().visuals.window_fill())
+                            .stroke(ctx.style().visuals.window_stroke())
+                            .rounding(12.0)
+                            .inner_margin(egui::Margin::symmetric(18.0, 16.0)),
+                    )
                     .show(ctx, |ui| {
-                        ui.label(RichText::new(&self.error.message).color(Color32::RED));
+                        ui.vertical_centered(|ui| {
+                            ui.heading(
+                                egui::RichText::new("Connection Error")
+                                    .color(egui::Color32::LIGHT_RED),
+                            );
+                        });
+
+                        ui.add_space(10.0);
                         ui.separator();
-                        if ui
-                            .button(RichText::new("Go back").color(Color32::LIGHT_GRAY))
-                            .clicked()
-                        {
-                            self.error.show = ShowMode::DontShow;
-                        }
+                        ui.add_space(10.0);
+
+                        ui.label(
+                            egui::RichText::new(&self.error.message)
+                                .size(14.0)
+                                .color(egui::Color32::RED),
+                        );
+
+                        ui.add_space(14.0);
+
+                        ui.with_layout(
+                            egui::Layout::top_down_justified(egui::Align::Center),
+                            |ui| {
+                                let back = ui.add_sized(
+                                    [ui.available_width(), 32.0],
+                                    egui::Button::new(egui::RichText::new("Go back").strong()),
+                                );
+
+                                if back.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                                {
+                                    self.error.show = ShowMode::DontShow;
+                                }
+                            },
+                        );
                     });
             }
+
             ShowMode::ShowMaskScreen => {
-                egui::Window::new(RichText::new("You are not nicked!").color(Color32::YELLOW))
+                egui::Window::new("Nickname Required")
                     .collapsible(false)
                     .resizable(false)
+                    .anchor(egui::Align2::CENTER_CENTER, [0.0, -40.0])
+                    .frame(
+                        egui::Frame::none()
+                            .fill(ctx.style().visuals.window_fill())
+                            .stroke(ctx.style().visuals.window_stroke())
+                            .rounding(12.0)
+                            .inner_margin(egui::Margin::symmetric(18.0, 16.0)),
+                    )
                     .show(ctx, |ui| {
-                        ui.label("🔌 Enter nickname:");
-                        let textedit = ui
-                            .add(egui::TextEdit::singleline(&mut self.nick).hint_text("Nickname"));
+                        ui.vertical_centered(|ui| {
+                            ui.heading(
+                                egui::RichText::new("Choose a nickname")
+                                    .color(egui::Color32::YELLOW),
+                            );
+                        });
 
-                        ui.memory_mut(|mem| mem.request_focus(textedit.id));
-                        if ui
-                            .button(RichText::new("Use nickname").color(Color32::LIGHT_GREEN))
-                            .clicked()
-                            && !self.nick.is_empty()
-                        {
-                            self.error.show = ShowMode::DontShow;
-                            self.nicked = true;
-                            self.set_nick();
-                            self.send_message();
-                        }
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(12.0);
 
-                        if ui
-                            .button(RichText::new("Don't nick").color(Color32::LIGHT_RED))
-                            .clicked()
-                        {
-                            self.error.show = ShowMode::DontShow;
-                            self.input = String::new();
-                            self.nick = String::new();
-                        }
+                        ui.label(
+                            egui::RichText::new("🔌 Enter nickname").color(egui::Color32::GRAY),
+                        );
+
+                        let edit = ui.add(
+                            egui::TextEdit::singleline(&mut self.nick)
+                                .hint_text("Nickname")
+                                .desired_width(ui.available_width()),
+                        );
+
+                        ui.memory_mut(|mem| mem.request_focus(edit.id));
+
+                        let enter_pressed =
+                            edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+
+                        ui.add_space(16.0);
+
+                        ui.with_layout(
+                            egui::Layout::top_down_justified(egui::Align::Center),
+                            |ui| {
+                                let use_nick = ui.add_enabled(
+                                    !self.nick.is_empty(),
+                                    egui::Button::new(
+                                        egui::RichText::new("Use nickname")
+                                            .strong()
+                                            .color(egui::Color32::BLACK),
+                                    )
+                                    .fill(egui::Color32::LIGHT_GREEN)
+                                    .min_size(egui::vec2(ui.available_width(), 34.0)),
+                                );
+
+                                if (use_nick.clicked() || enter_pressed) && !self.nick.is_empty() {
+                                    self.error.show = ShowMode::DontShow;
+                                    self.nicked = true;
+                                    self.set_nick();
+                                    self.send_message();
+                                }
+                            },
+                        );
+
+                        ui.add_space(8.0);
+
+                        ui.with_layout(
+                            egui::Layout::top_down_justified(egui::Align::Center),
+                            |ui| {
+                                let skip = ui.add_sized(
+                                    [ui.available_width(), 28.0],
+                                    egui::Button::new("Continue without nickname")
+                                        .fill(egui::Color32::from_gray(60)),
+                                );
+
+                                if skip.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))
+                                {
+                                    self.error.show = ShowMode::DontShow;
+                                    self.nick.clear();
+                                    self.input.clear();
+                                }
+                            },
+                        );
                     });
             }
-            _ => {}
+
+            ShowMode::DontShow => {}
         }
 
         if !self.is_connected {
@@ -934,6 +1021,10 @@ impl eframe::App for GuiClientApp {
                                     self.send_message();
                                 }
                             }
+
+                            // if self.error.show.ne(&ShowMode::DontShow) {
+                            //     return;
+                            // }
 
                             if response.lost_focus()
                                 && ui.input(|i| i.key_pressed(egui::Key::Enter))
