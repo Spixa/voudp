@@ -61,6 +61,19 @@ pub fn ask(prompt: &str) -> String {
     answer.trim().into()
 }
 
+pub fn is_whitespace_only(s: &str) -> bool {
+    s.chars().all(|c| {
+        c.is_whitespace()
+            || matches!(
+                c,
+                '\u{200B}' | // ZERO WIDTH SPACE
+            '\u{200C}' | // ZERO WIDTH NON-JOINER
+            '\u{200D}' | // ZERO WIDTH JOINER
+            '\u{FEFF}' // BYTE ORDER MARK
+            )
+    })
+}
+
 pub fn parse_global_list(bytes: &[u8]) -> Option<(Vec<ChannelInfo>, u32)> {
     if bytes.len() < 4 {
         return None;

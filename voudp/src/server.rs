@@ -634,6 +634,11 @@ impl ServerState {
                     return;
                 };
 
+                if util::is_whitespace_only(&msg) {
+                    Self::dm(&self.socket, addr, "Don't send an empty message".into());
+                    return;
+                }
+
                 let sender_addr = addr;
                 for remote in channel.remotes.iter() {
                     let addr = { remote.lock().unwrap().addr };
