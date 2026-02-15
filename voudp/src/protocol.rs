@@ -70,6 +70,14 @@ pub enum ControlRequest {
     // SetVolume takes a parameter, so it's handled separately
 }
 
+#[repr(u8)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandResultPacketType {
+    Success = 0x01,
+    Error = 0x02,
+    Silent = 0x03,
+}
+
 impl TryFrom<u8> for ClientPacketType {
     type Error = u8;
 
@@ -108,6 +116,19 @@ impl TryFrom<u8> for ConsolePacketType {
     }
 }
 
+impl TryFrom<u8> for CommandResultPacketType {
+    type Error = u8;
+
+    fn try_from(value: u8) -> Result<Self, <CommandResultPacketType as TryFrom<u8>>::Error> {
+        match value {
+            0x01 => Ok(Self::Success),
+            0x02 => Ok(Self::Error),
+            0x03 => Ok(Self::Silent),
+            _ => Err(value),
+        }
+    }
+}
+
 impl TryFrom<u8> for ControlRequest {
     type Error = u8;
 
@@ -122,11 +143,15 @@ impl TryFrom<u8> for ControlRequest {
     }
 }
 
-pub trait PacketSerializer {
+pub trait IntoPacket {
+    fn serialize(&self) -> Vec<u8>;
+}
+
+pub trait ToBytes {
     fn to_bytes(&self) -> Vec<u8>;
 }
 
-impl PacketSerializer for ClientPacketType {
+impl ToBytes for ClientPacketType {
     fn to_bytes(&self) -> Vec<u8> {
         vec![*self as u8]
     }

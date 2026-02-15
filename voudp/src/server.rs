@@ -17,7 +17,7 @@ use crate::{
     commands::CommandSystem,
     console_cmd::{ConsoleCommandResult, handle_command},
     mixer,
-    protocol::{self, ClientPacketType, ConsolePacketType, ControlRequest, PASSWORD},
+    protocol::{self, ClientPacketType, ConsolePacketType, ControlRequest, IntoPacket, PASSWORD},
     socket::{self, SecureUdpSocket},
     util::{self, CommandCategory, CommandContext, CommandResult},
 };
@@ -714,19 +714,8 @@ impl ServerState {
         // execute command
         let result = self.execute_command(&input, addr, mask.as_deref(), channel_id, is_admin);
 
-        match result {
-            CommandResult::Success(msg) => {
-                let mut packet = vec![0x0e]; // command success response 
-                packet.extend_from_slice(msg.as_bytes());
-                let _ = self.socket.send_reliable(packet, addr);
-            }
-            CommandResult::Error(msg) => {
-                let mut packet = vec![0x0f]; // command fail response 
-                packet.extend_from_slice(msg.as_bytes());
-                let _ = self.socket.send_reliable(packet, addr);
-            }
-            CommandResult::Silent => {}
-        };
+        let packet = result.serialize();
+        let _ = self.socket.send_to(&packet, addr);
     }
 
     pub fn handle_sync_commands(&mut self, addr: SocketAddr) {
@@ -827,7 +816,9 @@ impl ServerState {
         };
 
         match command.name.as_str() {
-            "/nick" => {}
+            "/nick" => {
+                return CommandResult::Success("Nick".into());
+            }
             "/other" => {}
             _ => {}
         }

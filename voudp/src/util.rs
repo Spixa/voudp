@@ -3,7 +3,7 @@ use std::io::Write;
 use std::net::SocketAddr;
 
 use crate::client::Message;
-use crate::protocol::{ClientPacketType, ControlRequest};
+use crate::protocol::{ClientPacketType, CommandResultPacketType, ControlRequest, IntoPacket};
 
 #[derive(Debug, Clone)]
 pub struct ChannelInfo {
@@ -72,6 +72,28 @@ pub fn is_whitespace_only(s: &str) -> bool {
             '\u{FEFF}' // BYTE ORDER MARK
             )
     })
+}
+
+impl IntoPacket for CommandResult {
+    fn serialize(&self) -> Vec<u8> {
+        let mut packet = vec![ClientPacketType::Cmd as u8];
+        match self {
+            CommandResult::Success(content) => {
+                packet.push(CommandResultPacketType::Success as u8);
+                packet.extend_from_slice(content.as_bytes());
+                packet
+            }
+            CommandResult::Error(content) => {
+                packet.push(CommandResultPacketType::Error as u8);
+                packet.extend_from_slice(content.as_bytes());
+                packet
+            }
+            CommandResult::Silent => {
+                packet.push(CommandResultPacketType::Silent as u8);
+                packet
+            }
+        }
+    }
 }
 
 pub fn parse_global_list(bytes: &[u8]) -> Option<(Vec<ChannelInfo>, u32)> {
@@ -226,6 +248,34 @@ pub fn parse_command_list(bytes: &[u8]) -> Option<Vec<ServerCommand>> {
     }
 
     Some(commands)
+}
+
+pub fn parse_command_response(data: &[u8]) -> Result<CommandResult, String> {
+    if data.is_empty() {
+        return Err("Command response too short!".into());
+    }
+
+    let mode = match CommandResultPacketType::try_from(data[0]) {
+        Ok(mode) => {
+            if mode.eq(&CommandResultPacketType::Silent) {
+                return Ok(CommandResult::Silent);
+            }
+            mode
+        }
+        Err(got) => return Err(format!("Invalid command result type: {got}")),
+    };
+
+    let Ok(content) = String::from_utf8(data[1..].to_vec()) else {
+        return Err("Invalid content from a non silent command response!".into());
+    };
+
+    match mode {
+        CommandResultPacketType::Success => Ok(CommandResult::Success(content)),
+        CommandResultPacketType::Error => Ok(CommandResult::Error(content)),
+        CommandResultPacketType::Silent => {
+            unreachable!("justification: voudp/src/util.rs:239:24")
+        }
+    }
 }
 
 pub fn parse_msg_packet(data: &[u8]) -> Result<(String, String, bool), String> {

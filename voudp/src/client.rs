@@ -12,7 +12,7 @@ use std::time::{Duration, Instant};
 
 use crate::protocol::{self, ClientPacketType};
 use crate::socket::{self, SecureUdpSocket};
-use crate::util::{self, ChannelInfo, ServerCommand};
+use crate::util::{self, ChannelInfo, CommandResult, ServerCommand};
 
 const TARGET_FRAME_SIZE: usize = 960; // 20ms at 48kHz
 const BUFFER_CAPACITY: usize = TARGET_FRAME_SIZE * 10; // 10 frames
@@ -48,6 +48,7 @@ pub enum Message {
     JoinMessage(String),
     LeaveMessage(String),
     ChatMessage(String, String, bool),
+    Command(CommandResult),
     Renick(String, String),
     Broadcast(String, String),
     Kick(String),
@@ -428,7 +429,11 @@ impl ClientState {
                             *list = commands;
                         }
                     }
-                    Ok(Cpt::Cmd) => {}
+                    Ok(Cpt::Cmd) => {
+                        if let Ok(result) = util::parse_command_response(&recv_buf[1..size]) {
+                            let _ = tx.send((Message::Command(result), Local::now()));
+                        }
+                    }
                     Ok(Cpt::Eof) => {}
                     Ok(Cpt::Kick) => {
                         let mut state = state.lock().unwrap();

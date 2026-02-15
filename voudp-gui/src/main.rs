@@ -17,7 +17,7 @@ use std::{
 use voudp::{
     client::{self, ClientState, GlobalListState, Message},
     socket::SecureUdpSocket,
-    util::ServerCommand,
+    util::{CommandResult, ServerCommand},
 };
 
 use crate::bubble::{badge, bubble_ui, parse_chat_message, parse_system_message};
@@ -844,6 +844,7 @@ impl eframe::App for GuiClientApp {
                             let is_system = *color == Color32::GRAY
                                 || *color == Color32::YELLOW
                                 || *color == Color32::LIGHT_GREEN
+                                || *color == Color32::LIGHT_RED
                                 || *color == Color32::RED;
 
                             if is_system {
@@ -1098,6 +1099,26 @@ impl eframe::App for GuiClientApp {
                             Color32::LIGHT_GREEN,
                             time,
                         ));
+                    }
+                    Message::Command(result) => {
+                        type Cr = CommandResult;
+                        match result {
+                            Cr::Success(content) => {
+                                self.logs.write().unwrap().push((
+                                    format!("[Command Result] {content}"),
+                                    Color32::LIGHT_GREEN,
+                                    time,
+                                ));
+                            }
+                            Cr::Error(content) => {
+                                self.logs.write().unwrap().push((
+                                    format!("[Command Result] {content}"),
+                                    Color32::LIGHT_RED,
+                                    time,
+                                ));
+                            }
+                            Cr::Silent => {}
+                        }
                     }
                     Message::Kick(msg) => {
                         drop(client);

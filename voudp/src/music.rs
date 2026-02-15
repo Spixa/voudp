@@ -27,7 +27,7 @@ use symphonia::{
 
 use crate::{
     client::Message,
-    protocol::{self, ClientPacketType, PacketSerializer},
+    protocol::{self, ClientPacketType, ToBytes},
     socket::{self, SecureUdpSocket},
     util::{self},
 };
