@@ -782,20 +782,7 @@ impl eframe::App for GuiClientApp {
                         )
                         .clicked()
                     {
-                        if let Some(client) = &self.client {
-                            client.lock().unwrap().disconnect();
-                        }
-
-                        if let Some(handle) = self.client_thread.take() {
-                            handle.join().ok();
-                        }
-
-                        self.is_connected = false;
-                        self.nicked = false;
-                        self.nick = String::new();
-                        self.client = None;
-
-                        self.write_log("Goodbye!".into(), Color32::GREEN);
+                        self.disconnect();
                         self.write_log(
                             format!(
                                 "Sent EOF to {}. It is now handling our departure",
@@ -1112,6 +1099,13 @@ impl eframe::App for GuiClientApp {
                             time,
                         ));
                     }
+                    Message::Kick(msg) => {
+                        drop(client);
+                        self.disconnect();
+
+                        self.error.message = msg;
+                        self.error.show = ShowMode::ShowError;
+                    }
                 },
                 Err(TryRecvError::Empty) => thread::yield_now(),
                 Err(TryRecvError::Disconnected) => {}
@@ -1123,6 +1117,19 @@ impl eframe::App for GuiClientApp {
 }
 
 impl GuiClientApp {
+    fn disconnect(&mut self) {
+        if let Some(client) = &self.client {
+            client.lock().unwrap().disconnect();
+        }
+
+        if let Some(handle) = self.client_thread.take() {
+            handle.join().ok();
+        }
+        self.is_connected = false;
+        self.nicked = false;
+        self.nick = String::new();
+        self.client = None;
+    }
     fn talking_indicator(&mut self, ui: &mut egui::Ui) -> egui::Response {
         let is_talking = self.client.clone();
 

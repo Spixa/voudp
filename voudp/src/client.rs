@@ -25,6 +25,7 @@ pub enum Mode {
 pub enum State {
     Fine,
     IncorrectPhraseError,
+    Kicked(String),
 }
 
 pub struct ClientState {
@@ -49,6 +50,7 @@ pub enum Message {
     ChatMessage(String, String, bool),
     Renick(String, String),
     Broadcast(String, String),
+    Kick(String),
 }
 
 pub struct GlobalListState {
@@ -428,6 +430,14 @@ impl ClientState {
                     }
                     Ok(Cpt::Cmd) => {}
                     Ok(Cpt::Eof) => {}
+                    Ok(Cpt::Kick) => {
+                        let mut state = state.lock().unwrap();
+                        let reason = String::from_utf8(recv_buf[1..size].to_vec())
+                            .unwrap_or("Unknown reason".into());
+                        *state = State::Kicked(reason.clone());
+
+                        let _ = tx.send((Message::Kick(reason.clone()), Local::now()));
+                    }
                     Ok(Cpt::Join) | Ok(Cpt::Mask) | Ok(Cpt::Ctrl) | Ok(Cpt::RegisterConsole) => {}
                     Err(_) => {}
                 },

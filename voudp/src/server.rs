@@ -649,6 +649,10 @@ impl ServerState {
                 }
 
                 info!("[#chan-{}] <{}> {}", chan_id, mask, msg);
+
+                if msg.eq("i want to be kicked") {
+                    self.kick_socket(addr, Some("We have successfully met your desires".into()));
+                }
             }
             None => {
                 let unauth_packet = vec![0x07];
@@ -871,6 +875,21 @@ impl ServerState {
 
     fn broadcast_join(&mut self, channel_id: u32, mask: String) {
         self.broadcast_join_masked(channel_id, mask, None);
+    }
+
+    fn kick_socket(&mut self, addr: SocketAddr, reason: Option<String>) {
+        if !self.remotes.contains_key(&addr) {
+            warn!("{} is not a registered client to kick!", addr);
+            return;
+        };
+
+        let mut packet = vec![ClientPacketType::Kick as u8];
+        if let Some(reason) = reason {
+            packet.extend_from_slice(reason.as_bytes());
+        }
+        let _ = self.socket.send_reliable(packet, addr);
+
+        self.handle_eof(addr);
     }
 
     fn broadcast_join_masked(

@@ -31,7 +31,8 @@ pub enum ClientPacketType {
     // 0x0f is reserved
     FlowRenick = 0x10,
     Dm = 0x11,
-    // 0x12-0xfe are reserved
+    Kick = 0x12,
+    // 0x13-0xfe are reserved
     RegisterConsole = 0xff,
 }
 
@@ -87,6 +88,7 @@ impl TryFrom<u8> for ClientPacketType {
             0x0d => Ok(Self::Cmd),
             0x10 => Ok(Self::FlowRenick),
             0x11 => Ok(Self::Dm),
+            0x12 => Ok(Self::Kick),
             0xff => Ok(Self::RegisterConsole),
             _ => Err(value),
         }
