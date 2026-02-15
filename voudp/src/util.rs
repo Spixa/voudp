@@ -97,6 +97,17 @@ impl IntoPacket for CommandResult {
     }
 }
 
+impl IntoPacket for BroadcastPacket {
+    fn serialize(&self) -> Vec<u8> {
+        let mut packet = vec![ClientPacketType::Broadcast as u8];
+        packet.extend_from_slice(self.title.as_bytes());
+        packet.push(0x01_u8);
+        packet.extend_from_slice(self.content.as_bytes());
+
+        packet
+    }
+}
+
 // Define your packet types
 #[derive(Debug, Clone)]
 pub struct GlobalListPacket {
@@ -119,6 +130,12 @@ pub struct ChatPacket {
     pub username: String,
     pub message: String,
     pub is_self: bool,
+}
+
+#[derive(Debug, Clone)]
+pub struct BroadcastPacket {
+    pub title: String,
+    pub content: String,
 }
 
 #[derive(Debug, Clone)]
@@ -396,6 +413,39 @@ impl FromPacket for ChatPacket {
                     message,
                     is_self,
                 })
+            }
+            _ => Err(PacketError::InvalidType(bytes[0])),
+        }
+    }
+}
+
+impl FromPacket for BroadcastPacket {
+    fn deserialize(bytes: &[u8]) -> Result<Self, PacketError> {
+        if bytes.is_empty() {
+            return Err(PacketError::TooShort(1, 0));
+        }
+
+        match ClientPacketType::try_from(bytes[0]) {
+            Ok(ClientPacketType::Broadcast) => {
+                if bytes.len() < 3 {
+                    return Err(PacketError::TooShort(3, bytes.len()));
+                }
+
+                // Find the delimiter (first 0x01 after the packet type)
+                let delimiter_pos = bytes[1..]
+                    .iter()
+                    .position(|&b| b == 0x01)
+                    .ok_or(PacketError::MissingDelimiter)?
+                    + 1;
+
+                if delimiter_pos == 1 {
+                    return Err(PacketError::InvalidData("username is empty".into()));
+                }
+
+                let title = String::from_utf8(bytes[1..delimiter_pos].to_vec())?;
+                let content = String::from_utf8(bytes[delimiter_pos + 1..].to_vec())?;
+
+                Ok(BroadcastPacket { title, content })
             }
             _ => Err(PacketError::InvalidType(bytes[0])),
         }

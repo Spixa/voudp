@@ -21,7 +21,10 @@ use crate::{
         self, ClientPacketType, ConsolePacketType, ControlRequest, FromPacket, IntoPacket, PASSWORD,
     },
     socket::{self, SecureUdpSocket},
-    util::{self, CommandCategory, CommandContext, CommandResult, ControlPacket, ServerCommand},
+    util::{
+        self, BroadcastPacket, CommandCategory, CommandContext, CommandResult, ControlPacket,
+        ServerCommand,
+    },
 };
 const JITTER_BUFFER_LEN: usize = 50;
 
@@ -261,7 +264,6 @@ impl ServerState {
         let socket = SecureUdpSocket::create(format!("0.0.0.0:{}", config.bind_port), key)?;
 
         info!("Bound to 0.0.0.0:{}", config.bind_port);
-        let socket = Arc::new(socket); // wrap in Arc
         info!(
             "There are {} free buffers (max remotes that can connect)",
             config.max_users
@@ -274,6 +276,7 @@ impl ServerState {
 
         let mut command_system = CommandSystem::new();
 
+        let socket_clone = socket.clone();
         command_system.register_command(
             ServerCommand {
                 name: "/info".into(),
@@ -284,8 +287,80 @@ impl ServerState {
                 requires_auth: false,
                 admin_only: false,
             },
-            move |_| CommandResult::Success(format!("{:#?}", config)),
+            move |_, _| CommandResult::Success(format!("{:#?}", config)),
         );
+
+        command_system.register_command(
+            ServerCommand {
+                name: "/broadcast".into(),
+                description: "Broadcast inside channel".into(),
+                usage: "/broadcast <message>".into(),
+                category: CommandCategory::Admin,
+                aliases: vec![],
+                requires_auth: true,
+                admin_only: false,
+            },
+            move |ctx, chans| {
+                if ctx.arguments.is_empty() {
+                    return CommandResult::Error("usage: /broadcast <message>".into());
+                }
+
+                Self::broadcast_channel(
+                    socket_clone.clone(),
+                    chans,
+                    ctx.channel_id,
+                    ctx.arguments.join(" "),
+                    String::new(),
+                );
+
+                CommandResult::Silent
+            },
+        );
+
+        command_system.register_command(
+            ServerCommand {
+                name: "/dox".into(),
+                description: "Dox a user".into(),
+                usage: "/dox <mask>".into(),
+                category: CommandCategory::Admin,
+                aliases: vec![],
+                requires_auth: true,
+                admin_only: false,
+            },
+            move |ctx, chans| {
+                if ctx.arguments.is_empty() {
+                    return CommandResult::Error("usage: /dox <mask>".into());
+                }
+
+                if let Some(chan) = chans.get(&ctx.channel_id) {
+                    let remote = chan.remotes.iter().find(|remote| {
+                        remote
+                            .lock()
+                            .unwrap()
+                            .mask
+                            .clone()
+                            .is_some_and(|r| r.eq(&ctx.arguments[0]))
+                    });
+
+                    if let Some(remote) = remote {
+                        let ip = remote.lock().unwrap().addr;
+                        return CommandResult::Success(format!(
+                            "{} is connected to voudp from {}",
+                            ctx.arguments[0], ip
+                        ));
+                    } else {
+                        return CommandResult::Error(format!(
+                            "did not find any socket information about {}",
+                            ctx.arguments[0]
+                        ));
+                    }
+                }
+
+                CommandResult::Silent
+            },
+        );
+
+        let socket = Arc::new(socket); // wrap in Arc
 
         Ok(Self {
             socket: Arc::clone(&socket),
@@ -834,7 +909,7 @@ impl ServerState {
 
         let cmd_name = &command.name;
         if let Some((_, func)) = self.command_system.get_command(cmd_name) {
-            func(&context)
+            func(&context, &mut self.channels)
         } else {
             CommandResult::Silent
         }
@@ -900,6 +975,35 @@ impl ServerState {
         let _ = self.socket.send_reliable(packet, addr);
 
         self.handle_eof(addr);
+    }
+
+    fn broadcast_channel(
+        socket: SecureUdpSocket,
+        channels: &mut HashMap<u32, Channel>,
+        channel_id: u32,
+        title: String,
+        content: String,
+    ) {
+        let peer_addresses: Vec<SocketAddr> = if let Some(channel) = channels.get(&channel_id) {
+            channel
+                .remotes
+                .iter()
+                .map(|r| r.lock().unwrap().addr)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let packet = BroadcastPacket { title, content }.serialize();
+
+        for peer_addr in peer_addresses {
+            if let Err(e) = socket.send_reliable(packet.clone(), peer_addr) {
+                warn!(
+                    "Failed to broadcast packet to {}: {:?} in channel {channel_id}",
+                    peer_addr, e
+                );
+            }
+        }
     }
 
     fn broadcast_join_masked(

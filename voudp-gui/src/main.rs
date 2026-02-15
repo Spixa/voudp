@@ -1298,7 +1298,7 @@ impl GuiClientApp {
                 if requires_auth_warning {
                     self.error.show = ShowMode::ShowMaskScreen;
                     self.error.message = "You need to set a nickname first!".to_string();
-                } else if self.input == command.name {
+                } else if self.input.starts_with(&command.name) {
                     // second enter -> execute
                     self.execute_command();
                 } else {

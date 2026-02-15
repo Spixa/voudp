@@ -1,8 +1,15 @@
 use std::collections::HashMap;
 
-use crate::util::{CommandCategory, CommandContext, CommandResult, ServerCommand};
+use crate::{
+    server::Channel,
+    util::{CommandCategory, CommandContext, CommandResult, ServerCommand},
+};
 
-pub type CommandFn = Box<dyn Fn(&CommandContext) -> CommandResult + Send + Sync>;
+pub type CommandFn = Box<
+    dyn Fn(&CommandContext, &mut std::collections::HashMap<u32, Channel>) -> CommandResult
+        + Send
+        + Sync,
+>;
 
 #[derive(Default)]
 pub struct CommandSystem {
@@ -32,7 +39,7 @@ impl CommandSystem {
                 requires_auth: true,
                 admin_only: false,
             },
-            |ctx| {
+            |ctx, _| {
                 let mask = ctx.sender_mask.clone().unwrap();
 
                 if mask.eq("spixa") {
@@ -181,7 +188,10 @@ impl CommandSystem {
 
     pub fn register_command<F>(&mut self, command: ServerCommand, f: F)
     where
-        F: Fn(&CommandContext) -> CommandResult + Send + Sync + 'static,
+        F: Fn(&CommandContext, &mut std::collections::HashMap<u32, Channel>) -> CommandResult
+            + Send
+            + Sync
+            + 'static,
     {
         let cmd_name = command.name.clone();
 

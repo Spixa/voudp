@@ -13,8 +13,8 @@ use std::time::{Duration, Instant};
 use crate::protocol::{self, ClientPacketType, FromPacket};
 use crate::socket::{self, SecureUdpSocket};
 use crate::util::{
-    self, ChannelInfo, ChatPacket, CommandListPacket, CommandResponsePacket, CommandResult,
-    FlowPacket, GlobalListPacket, ServerCommand,
+    self, BroadcastPacket, ChannelInfo, ChatPacket, CommandListPacket, CommandResponsePacket,
+    CommandResult, FlowPacket, GlobalListPacket, ServerCommand,
 };
 
 const TARGET_FRAME_SIZE: usize = 960; // 20ms at 48kHz
@@ -413,6 +413,17 @@ impl ClientState {
                         Ok(chat) => {
                             let _ = tx.send((
                                 Message::ChatMessage(chat.username, chat.message, chat.is_self),
+                                Local::now(),
+                            ));
+                        }
+                        Err(e) => {
+                            eprintln!("error: {e}");
+                        }
+                    },
+                    Ok(Cpt::Broadcast) => match BroadcastPacket::deserialize(&recv_buf[..size]) {
+                        Ok(broadcast) => {
+                            let _ = tx.send((
+                                Message::Broadcast(broadcast.title, broadcast.content),
                                 Local::now(),
                             ));
                         }
