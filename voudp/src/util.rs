@@ -2,8 +2,9 @@ use std::io;
 use std::io::Write;
 use std::net::SocketAddr;
 
-use crate::client::Message;
-use crate::protocol::{ClientPacketType, CommandResultPacketType, ControlRequest, IntoPacket};
+use crate::protocol::{
+    ClientPacketType, CommandResultPacketType, ControlRequest, FromPacket, IntoPacket, PacketError,
+};
 
 #[derive(Debug, Clone)]
 pub struct ChannelInfo {
@@ -96,290 +97,382 @@ impl IntoPacket for CommandResult {
     }
 }
 
-pub fn parse_global_list(bytes: &[u8]) -> Option<(Vec<ChannelInfo>, u32)> {
-    if bytes.len() < 4 {
-        return None;
-    }
+// Define your packet types
+#[derive(Debug, Clone)]
+pub struct GlobalListPacket {
+    pub channels: Vec<ChannelInfo>,
+    pub current: u32,
+}
 
-    let current = u32::from_be_bytes(bytes[0..4].try_into().ok()?);
-    let chan_count = u32::from_be_bytes(bytes[4..8].try_into().ok()?);
-    let mut channels = Vec::new();
-    let mut i = 8;
+#[derive(Debug, Clone)]
+pub struct CommandListPacket {
+    pub commands: Vec<ServerCommand>,
+}
 
-    for _ in 0..chan_count {
-        if i + 12 > bytes.len() {
-            return None;
+#[derive(Debug, Clone)]
+pub struct CommandResponsePacket {
+    pub result: CommandResult,
+}
+
+#[derive(Debug, Clone)]
+pub struct ChatPacket {
+    pub username: String,
+    pub message: String,
+    pub is_self: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum FlowPacket {
+    Join(String),
+    Leave(String),
+    Renick { old_mask: String, new_mask: String },
+    Broadcast { from: String, message: String },
+}
+
+#[derive(Debug, Clone)]
+pub struct ControlPacket {
+    pub request: ControlRequest,
+}
+
+impl FromPacket for GlobalListPacket {
+    fn deserialize(bytes: &[u8]) -> Result<Self, PacketError> {
+        if bytes.len() < 8 {
+            return Err(PacketError::TooShort(8, bytes.len()));
         }
-        let chan_name_len = u8::from_be_bytes([bytes[i]]);
-        i += 1;
-        let name = String::from_utf8(bytes[i..i + 1 + chan_name_len as usize].to_vec()).ok()?;
 
-        i += chan_name_len as usize;
+        let current = u32::from_be_bytes(bytes[0..4].try_into()?);
+        let chan_count = u32::from_be_bytes(bytes[4..8].try_into()?);
+        let mut channels = Vec::new();
+        let mut i = 8;
 
-        let channel_id = u32::from_be_bytes(bytes[i..i + 4].try_into().ok()?);
-        let unmasked_count = u32::from_be_bytes(bytes[i + 4..i + 8].try_into().ok()?);
-        let masked_count = u32::from_be_bytes(bytes[i + 8..i + 12].try_into().ok()?);
-
-        i += 12;
-        let mut masked_users = Vec::new();
-
-        for _ in 0..masked_count {
-            let sep_pos = bytes[i..].iter().position(|&b| b == 0x01)?;
-            let mask_str = String::from_utf8(bytes[i..i + sep_pos].to_vec()).ok()?;
-            i += sep_pos + 1;
-
+        for _ in 0..chan_count {
+            // Ensure we have at least the channel name length byte
             if i >= bytes.len() {
-                return None;
+                return Err(PacketError::BufferUnderflow(i));
             }
 
+            let chan_name_len = bytes[i] as usize;
+            i += 1;
+
+            // Check if we have enough bytes for the channel name
+            if i + chan_name_len > bytes.len() {
+                return Err(PacketError::BufferUnderflow(i));
+            }
+
+            let name = String::from_utf8(bytes[i..i + chan_name_len].to_vec())?;
+            i += chan_name_len;
+
+            // Check if we have enough bytes for channel metadata
+            if i + 12 > bytes.len() {
+                return Err(PacketError::BufferUnderflow(i));
+            }
+
+            let channel_id = u32::from_be_bytes(bytes[i..i + 4].try_into()?);
+            let unmasked_count = u32::from_be_bytes(bytes[i + 4..i + 8].try_into()?);
+            let masked_count = u32::from_be_bytes(bytes[i + 8..i + 12].try_into()?);
+            i += 12;
+
+            let mut masked_users = Vec::new();
+
+            for _ in 0..masked_count {
+                // Find the delimiter (0x01)
+                let sep_pos = bytes[i..]
+                    .iter()
+                    .position(|&b| b == 0x01)
+                    .ok_or(PacketError::MissingDelimiter)?;
+
+                if i + sep_pos > bytes.len() {
+                    return Err(PacketError::BufferUnderflow(i));
+                }
+
+                let mask_str = String::from_utf8(bytes[i..i + sep_pos].to_vec())?;
+                i += sep_pos + 1; // +1 for the delimiter
+
+                if i >= bytes.len() {
+                    return Err(PacketError::BufferUnderflow(i));
+                }
+
+                let flags = bytes[i];
+                i += 1;
+
+                let muted = flags & 0b00000001 != 0;
+                let deafened = flags & 0b00000010 != 0;
+
+                masked_users.push((mask_str, muted, deafened));
+            }
+
+            channels.push(ChannelInfo {
+                name,
+                channel_id,
+                unmasked_count,
+                masked_users,
+            });
+        }
+
+        channels.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
+
+        Ok(GlobalListPacket { channels, current })
+    }
+}
+
+impl FromPacket for CommandListPacket {
+    fn deserialize(bytes: &[u8]) -> Result<Self, PacketError> {
+        if bytes.len() < 2 {
+            return Err(PacketError::TooShort(2, bytes.len()));
+        }
+
+        let count = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
+        let mut commands = Vec::new();
+        let mut i = 2;
+
+        for _ in 0..count {
+            if i >= bytes.len() {
+                return Err(PacketError::BufferUnderflow(i));
+            }
+
+            // Parse name
+            let name_len = bytes[i] as usize;
+            i += 1;
+            if i + name_len > bytes.len() {
+                return Err(PacketError::BufferUnderflow(i));
+            }
+            let name = String::from_utf8(bytes[i..i + name_len].to_vec())?;
+            i += name_len;
+
+            // Parse description
+            if i >= bytes.len() {
+                return Err(PacketError::BufferUnderflow(i));
+            }
+            let desc_len = bytes[i] as usize;
+            i += 1;
+            if i + desc_len > bytes.len() {
+                return Err(PacketError::BufferUnderflow(i));
+            }
+            let description = String::from_utf8(bytes[i..i + desc_len].to_vec())?;
+            i += desc_len;
+
+            // Parse usage
+            if i >= bytes.len() {
+                return Err(PacketError::BufferUnderflow(i));
+            }
+            let usage_len = bytes[i] as usize;
+            i += 1;
+            if i + usage_len > bytes.len() {
+                return Err(PacketError::BufferUnderflow(i));
+            }
+            let usage = String::from_utf8(bytes[i..i + usage_len].to_vec())?;
+            i += usage_len;
+
+            // Parse category
+            if i >= bytes.len() {
+                return Err(PacketError::BufferUnderflow(i));
+            }
+            let category_byte = bytes[i];
+            i += 1;
+            let category = match category_byte {
+                0 => CommandCategory::User,
+                1 => CommandCategory::Channel,
+                2 => CommandCategory::Audio,
+                3 => CommandCategory::Chat,
+                4 => CommandCategory::Admin,
+                5 => CommandCategory::Utility,
+                6 => CommandCategory::Fun,
+                _ => return Err(PacketError::InvalidCommandCategory(category_byte)),
+            };
+
+            // Parse flags
+            if i >= bytes.len() {
+                return Err(PacketError::BufferUnderflow(i));
+            }
             let flags = bytes[i];
             i += 1;
+            let requires_auth = flags & 0b00000001 != 0;
+            let admin_only = flags & 0b00000010 != 0;
 
-            let muted = flags & 0b00000001 != 0;
-            let deafened = flags & 0b00000010 != 0;
+            // Parse aliases
+            if i >= bytes.len() {
+                return Err(PacketError::BufferUnderflow(i));
+            }
+            let alias_count = bytes[i] as usize;
+            i += 1;
+            let mut aliases = Vec::new();
 
-            masked_users.push((mask_str, muted, deafened));
+            for _ in 0..alias_count {
+                if i >= bytes.len() {
+                    return Err(PacketError::BufferUnderflow(i));
+                }
+
+                let alias_len = bytes[i] as usize;
+                i += 1;
+                if i + alias_len > bytes.len() {
+                    return Err(PacketError::BufferUnderflow(i));
+                }
+
+                let alias = String::from_utf8(bytes[i..i + alias_len].to_vec())?;
+                i += alias_len;
+                aliases.push(alias);
+            }
+
+            commands.push(ServerCommand {
+                name,
+                description,
+                usage,
+                category,
+                aliases,
+                requires_auth,
+                admin_only,
+            });
         }
 
-        channels.push(ChannelInfo {
-            name,
-            channel_id,
-            unmasked_count,
-            masked_users,
-        });
+        Ok(CommandListPacket { commands })
     }
-
-    channels.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
-
-    Some((channels, current))
 }
 
-pub fn parse_command_list(bytes: &[u8]) -> Option<Vec<ServerCommand>> {
-    if bytes.len() < 2 {
-        return None;
-    }
-
-    let count = u16::from_be_bytes([bytes[0], bytes[1]]) as usize;
-    let mut commands = Vec::new();
-    let mut i = 2;
-
-    for _ in 0..count {
-        if i >= bytes.len() {
-            return None;
+impl FromPacket for CommandResponsePacket {
+    fn deserialize(bytes: &[u8]) -> Result<Self, PacketError> {
+        if bytes.is_empty() {
+            return Err(PacketError::TooShort(1, 0));
         }
 
-        // Parse name
-        let name_len = bytes[i] as usize;
-        i += 1;
-        if i + name_len > bytes.len() {
-            return None;
-        }
-        let name = String::from_utf8(bytes[i..i + name_len].to_vec()).ok()?;
-        i += name_len;
+        let mode = CommandResultPacketType::try_from(bytes[0])
+            .map_err(|_| PacketError::InvalidType(bytes[0]))?;
 
-        // Parse description
-        let desc_len = bytes[i] as usize;
-        i += 1;
-        if i + desc_len > bytes.len() {
-            return None;
+        if mode == CommandResultPacketType::Silent {
+            return Ok(CommandResponsePacket {
+                result: CommandResult::Silent,
+            });
         }
-        let description = String::from_utf8(bytes[i..i + desc_len].to_vec()).ok()?;
-        i += desc_len;
 
-        // Parse usage
-        let usage_len = bytes[i] as usize;
-        i += 1;
-        if i + usage_len > bytes.len() {
-            return None;
+        if bytes.len() < 2 {
+            return Err(PacketError::TooShort(2, bytes.len()));
         }
-        let usage = String::from_utf8(bytes[i..i + usage_len].to_vec()).ok()?;
-        i += usage_len;
 
-        // Parse category
-        let category_byte = bytes[i];
-        i += 1;
-        let category = match category_byte {
-            0 => CommandCategory::User,
-            1 => CommandCategory::Channel,
-            2 => CommandCategory::Audio,
-            3 => CommandCategory::Chat,
-            4 => CommandCategory::Admin,
-            5 => CommandCategory::Utility,
-            6 => CommandCategory::Fun,
-            _ => return None,
+        let content = String::from_utf8(bytes[1..].to_vec())?;
+
+        let result = match mode {
+            CommandResultPacketType::Success => CommandResult::Success(content),
+            CommandResultPacketType::Error => CommandResult::Error(content),
+            CommandResultPacketType::Silent => unreachable!(),
         };
 
-        // Parse flags
-        let flags = bytes[i];
-        i += 1;
-        let requires_auth = flags & 0b00000001 != 0;
-        let admin_only = flags & 0b00000010 != 0;
-
-        // Parse aliases
-        let alias_count = bytes[i] as usize;
-        i += 1;
-        let mut aliases = Vec::new();
-
-        for _ in 0..alias_count {
-            if i >= bytes.len() {
-                return None;
-            }
-
-            let alias_len = bytes[i] as usize;
-            i += 1;
-            if i + alias_len > bytes.len() {
-                return None;
-            }
-
-            let alias = String::from_utf8(bytes[i..i + alias_len].to_vec()).ok()?;
-            i += alias_len;
-            aliases.push(alias);
-        }
-
-        commands.push(ServerCommand {
-            name,
-            description,
-            usage,
-            category,
-            aliases,
-            requires_auth,
-            admin_only,
-        });
+        Ok(CommandResponsePacket { result })
     }
-
-    Some(commands)
 }
 
-pub fn parse_command_response(data: &[u8]) -> Result<CommandResult, String> {
-    if data.is_empty() {
-        return Err("Command response too short!".into());
-    }
-
-    let mode = match CommandResultPacketType::try_from(data[0]) {
-        Ok(mode) => {
-            if mode.eq(&CommandResultPacketType::Silent) {
-                return Ok(CommandResult::Silent);
-            }
-            mode
+impl FromPacket for ChatPacket {
+    fn deserialize(bytes: &[u8]) -> Result<Self, PacketError> {
+        if bytes.is_empty() {
+            return Err(PacketError::TooShort(1, 0));
         }
-        Err(got) => return Err(format!("Invalid command result type: {got}")),
-    };
 
-    let Ok(content) = String::from_utf8(data[1..].to_vec()) else {
-        return Err("Invalid content from a non silent command response!".into());
-    };
+        match ClientPacketType::try_from(bytes[0]) {
+            Ok(ClientPacketType::Chat) => {
+                if bytes.len() < 3 {
+                    return Err(PacketError::TooShort(3, bytes.len()));
+                }
 
-    match mode {
-        CommandResultPacketType::Success => Ok(CommandResult::Success(content)),
-        CommandResultPacketType::Error => Ok(CommandResult::Error(content)),
-        CommandResultPacketType::Silent => {
-            unreachable!("justification: voudp/src/util.rs:239:24")
+                // Find the delimiter (first 0x01 after the packet type)
+                let delimiter_pos = bytes[1..]
+                    .iter()
+                    .position(|&b| b == 0x01)
+                    .ok_or(PacketError::MissingDelimiter)?
+                    + 1;
+
+                if delimiter_pos == 1 {
+                    return Err(PacketError::InvalidData("username is empty".into()));
+                }
+
+                let username = String::from_utf8(bytes[1..delimiter_pos].to_vec())?;
+
+                if bytes.len() <= delimiter_pos + 1 {
+                    return Err(PacketError::InvalidData("missing is_self flag".into()));
+                }
+
+                let is_self = bytes[delimiter_pos + 1] != 0;
+                let message = String::from_utf8(bytes[delimiter_pos + 2..].to_vec())?;
+
+                Ok(ChatPacket {
+                    username,
+                    message,
+                    is_self,
+                })
+            }
+            _ => Err(PacketError::InvalidType(bytes[0])),
         }
     }
 }
 
-pub fn parse_msg_packet(data: &[u8]) -> Result<(String, String, bool), String> {
-    if data.is_empty() {
-        return Err("empty packet".into());
-    }
-    if data.len() < 3 {
-        // at least [type, username, delim, flag, ...?]
-        return Err("packet too short".into());
-    }
-
-    match ClientPacketType::try_from(data[0]) {
-        Ok(ClientPacketType::Chat) => {
-            // Find the delimiter (first 0x01 after the packet type)
-            let delimiter_pos = match data[1..].iter().position(|&b| b == 0x01) {
-                Some(pos) => 1 + pos, // absolute index
-                None => return Err("no 0x01 delimiter found".into()),
-            };
-
-            if delimiter_pos == 1 {
-                return Err("username is empty".into());
-            }
-
-            // Username = bytes between index 1 and delimiter_pos
-            let username_bytes = &data[1..delimiter_pos];
-            let username = String::from_utf8(username_bytes.to_vec())
-                .map_err(|_| "invalid UTF-8 in username")?;
-
-            // After delimiter: flag byte, then message
-            if data.len() <= delimiter_pos + 1 {
-                return Err("missing is_self flag".into());
-            }
-            let is_self = data[delimiter_pos + 1] != 0;
-
-            let message_bytes = &data[delimiter_pos + 2..];
-            let message = String::from_utf8(message_bytes.to_vec())
-                .map_err(|_| "invalid UTF-8 in message")?;
-
-            Ok((username, message, is_self))
+impl FromPacket for FlowPacket {
+    fn deserialize(bytes: &[u8]) -> Result<Self, PacketError> {
+        if bytes.is_empty() {
+            return Err(PacketError::TooShort(1, 0));
         }
-        _ => Err("not a chat packet".into()),
+
+        match ClientPacketType::try_from(bytes[0])
+            .map_err(|_| PacketError::InvalidType(bytes[0]))?
+        {
+            ClientPacketType::FlowJoin => {
+                let uname = String::from_utf8(bytes[1..].to_vec())?;
+                Ok(FlowPacket::Join(uname))
+            }
+            ClientPacketType::FlowLeave => {
+                let uname = String::from_utf8(bytes[1..].to_vec())?;
+                Ok(FlowPacket::Leave(uname))
+            }
+            ClientPacketType::FlowRenick => {
+                if bytes.len() < 2 {
+                    return Err(PacketError::TooShort(2, bytes.len()));
+                }
+
+                let mut i = 1;
+                let old_mask_len = bytes[i] as usize;
+                i += 1;
+
+                if i + old_mask_len > bytes.len() {
+                    return Err(PacketError::BufferUnderflow(i));
+                }
+                let old_mask = String::from_utf8(bytes[i..i + old_mask_len].to_vec())?;
+                i += old_mask_len;
+
+                if i >= bytes.len() {
+                    return Err(PacketError::BufferUnderflow(i));
+                }
+                let new_mask_len = bytes[i] as usize;
+                i += 1;
+
+                if i + new_mask_len > bytes.len() {
+                    return Err(PacketError::BufferUnderflow(i));
+                }
+                let new_mask = String::from_utf8(bytes[i..i + new_mask_len].to_vec())?;
+
+                Ok(FlowPacket::Renick { old_mask, new_mask })
+            }
+            ClientPacketType::Dm => {
+                let msg = String::from_utf8(bytes[1..].to_vec())?;
+                Ok(FlowPacket::Broadcast {
+                    from: "Server".into(),
+                    message: msg,
+                })
+            }
+            _ => Err(PacketError::InvalidType(bytes[0])),
+        }
     }
 }
 
-pub fn parse_flow_packet(data: &[u8]) -> Option<Message> {
-    if data.is_empty() {
-        return None;
-    }
-
-    match ClientPacketType::try_from(data[0]) {
-        Ok(ClientPacketType::FlowJoin) => {
-            let uname = &data[1..];
-            let Ok(uname) = String::from_utf8(uname.to_vec()) else {
-                return None;
-            };
-            Some(Message::JoinMessage(uname))
+impl FromPacket for ControlPacket {
+    fn deserialize(bytes: &[u8]) -> Result<Self, PacketError> {
+        if bytes.is_empty() {
+            return Err(PacketError::TooShort(1, 0));
         }
-        Ok(ClientPacketType::FlowLeave) => {
-            let uname = &data[1..];
-            let Ok(uname) = String::from_utf8(uname.to_vec()) else {
-                return None;
-            };
-            Some(Message::LeaveMessage(uname))
-        }
-        Ok(ClientPacketType::FlowRenick) => {
-            let mut i = 1;
-            let old_mask_len = u8::from_be_bytes([data[i]]);
-            i += 1;
-            let old_mask = String::from_utf8(data[i..i + old_mask_len as usize].to_vec()).ok()?;
-            i += old_mask_len as usize;
 
-            let new_mask_len = u8::from_be_bytes([data[i]]);
-            i += 1;
-            let new_mask = String::from_utf8(data[i..i + new_mask_len as usize].to_vec()).ok()?;
-            Some(Message::Renick(old_mask, new_mask))
-        }
-        Ok(ClientPacketType::Dm) => {
-            let msg = &data[1..];
-            let Ok(msg) = String::from_utf8(msg.to_vec()) else {
-                return None;
-            };
-            Some(Message::Broadcast("Server".into(), msg))
-        }
-        _ => None,
-    }
-}
+        let request = match bytes[0] {
+            0x01 => ControlRequest::SetDeafen,
+            0x02 => ControlRequest::SetUndeafen,
+            0x03 => ControlRequest::SetMute,
+            0x04 => ControlRequest::SetUnmute,
+            _ => return Err(PacketError::InvalidType(bytes[0])),
+        };
 
-pub fn parse_control_packet(data: &[u8]) -> Result<ControlRequest, String> {
-    if data.is_empty() {
-        return Err("empty packet".into());
-    }
-
-    match data[0] {
-        0x01 => Ok(ControlRequest::SetDeafen),
-        0x02 => Ok(ControlRequest::SetUndeafen),
-        0x03 => Ok(ControlRequest::SetMute),
-        0x04 => Ok(ControlRequest::SetUnmute),
-        // 0x05 => {
-        //     if data.len() < 2 {
-        //         Err("volume packet too short".into())
-        //     } else {
-        //         Ok(ControlRequest::SetVolume(data[1]))
-        //     }
-        // }
-        _ => Err("Invalid control packet".into()),
+        Ok(ControlPacket { request })
     }
 }

@@ -18,5 +18,4 @@
 * This step will be done by the handshake process, too exactly like [openSIMP](https://github.com/spixa/opensimp)'s [spec](https://github.com/Spixa/openSIMP/blob/main/specs/handshake.md)
 
 ## Misc features
-* Implement all commands that are currently in the command list
 * Add networking telemetry

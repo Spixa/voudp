@@ -26,10 +26,9 @@ use symphonia::{
 };
 
 use crate::{
-    client::Message,
-    protocol::{self, ClientPacketType, ToBytes},
+    protocol::{self, ClientPacketType, FromPacket, ToBytes},
     socket::{self, SecureUdpSocket},
-    util::{self},
+    util::{ChatPacket, FlowPacket},
 };
 
 const TARGET_SAMPLE_RATE: u32 = 48_000;
@@ -95,8 +94,11 @@ impl MusicClientState {
                             match sock.recv_from(&mut recv_buf) {
                                 Ok((size, _)) => {
                                     if size > 1 && recv_buf[0] == 0x06 {
-                                        match util::parse_msg_packet(&recv_buf[..size]) {
-                                            Ok((caster, cmd, _)) => {
+                                        match ChatPacket::deserialize(&recv_buf[..size]) {
+                                            Ok(chat) => {
+                                                let caster = chat.username;
+                                                let cmd = chat.message;
+
                                                 if cmd.starts_with("#current") {
                                                     let mut msg_packet = vec![0x06];
                                                     msg_packet.extend_from_slice(
@@ -155,26 +157,20 @@ impl MusicClientState {
 
                                     if size > 1
                                         && (recv_buf[0] == 0x0a || recv_buf[0] == 0x0b)
-                                        && let Some(msg) =
-                                            util::parse_flow_packet(&recv_buf[..size])
+                                        && let Ok(msg) = FlowPacket::deserialize(&recv_buf[..size])
+                                        && let FlowPacket::Join(name) = msg
                                     {
-                                        match msg {
-                                            Message::JoinMessage(name) => {
-                                                let mut msg_packet = vec![0x06];
-                                                msg_packet.extend_from_slice(
-                                                    format!(
-                                                        "Why hello there, {name}. I'm playing {}",
-                                                        { current_music.lock().unwrap() }
-                                                    )
-                                                    .as_bytes(),
-                                                );
-                                                let _ = sock.send(&msg_packet);
-                                            }
-                                            Message::Renick(_, _) => {}
-                                            _ => {}
-                                        }
+                                        let mut msg_packet = vec![0x06];
+                                        msg_packet.extend_from_slice(
+                                            format!("Why hello there, {name}. I'm playing {}", {
+                                                current_music.lock().unwrap()
+                                            })
+                                            .as_bytes(),
+                                        );
+                                        let _ = sock.send(&msg_packet);
                                     }
                                 }
+
                                 Err(e) if e.0.kind() == ErrorKind::WouldBlock => {
                                     thread::sleep(Duration::from_micros(100));
                                 }

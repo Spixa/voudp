@@ -10,9 +10,12 @@ use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
-use crate::protocol::{self, ClientPacketType};
+use crate::protocol::{self, ClientPacketType, FromPacket};
 use crate::socket::{self, SecureUdpSocket};
-use crate::util::{self, ChannelInfo, CommandResult, ServerCommand};
+use crate::util::{
+    self, ChannelInfo, ChatPacket, CommandListPacket, CommandResponsePacket, CommandResult,
+    FlowPacket, GlobalListPacket, ServerCommand,
+};
 
 const TARGET_FRAME_SIZE: usize = 960; // 20ms at 48kHz
 const BUFFER_CAPACITY: usize = TARGET_FRAME_SIZE * 10; // 10 frames
@@ -389,15 +392,15 @@ impl ClientState {
                     }
                     Ok(Cpt::List) => {
                         let packet = &recv_buf[..size];
-                        let Some(parsed) = util::parse_global_list(&packet[1..]) else {
+                        let Ok(parsed) = GlobalListPacket::deserialize(&packet[1..]) else {
                             eprintln!("error: Received bad list");
                             continue;
                         };
 
                         {
                             let mut list = list.lock().unwrap();
-                            list.channels = parsed.0;
-                            list.current_channel = parsed.1;
+                            list.channels = parsed.channels;
+                            list.current_channel = parsed.current;
                             list.last_updated = Instant::now();
 
                             ping.store(
@@ -406,10 +409,10 @@ impl ClientState {
                             );
                         }
                     }
-                    Ok(Cpt::Chat) => match util::parse_msg_packet(&recv_buf[..size]) {
-                        Ok((username, text, is_self)) => {
+                    Ok(Cpt::Chat) => match ChatPacket::deserialize(&recv_buf[..size]) {
+                        Ok(chat) => {
                             let _ = tx.send((
-                                Message::ChatMessage(username, text, is_self),
+                                Message::ChatMessage(chat.username, chat.message, chat.is_self),
                                 Local::now(),
                             ));
                         }
@@ -418,20 +421,31 @@ impl ClientState {
                         }
                     },
                     Ok(Cpt::FlowJoin) | Ok(Cpt::FlowLeave) | Ok(Cpt::FlowRenick) | Ok(Cpt::Dm) => {
-                        if let Some(msg) = util::parse_flow_packet(&recv_buf[..size]) {
+                        if let Ok(flow) = FlowPacket::deserialize(&recv_buf[..size]) {
+                            let msg = match flow {
+                                FlowPacket::Join(user) => Message::JoinMessage(user),
+                                FlowPacket::Leave(user) => Message::LeaveMessage(user),
+                                FlowPacket::Renick { old_mask, new_mask } => {
+                                    Message::Renick(old_mask, new_mask)
+                                }
+                                FlowPacket::Broadcast { from, message } => {
+                                    Message::Broadcast(from, message)
+                                }
+                            };
+
                             let _ = tx.send((msg, Local::now())); // this is quite fucked
                         }
                     }
                     Ok(Cpt::CommandResponse) => {}
                     Ok(Cpt::SyncCommands) => {
-                        if let Some(commands) = util::parse_command_list(&recv_buf[1..size]) {
+                        if let Ok(packet) = CommandListPacket::deserialize(&recv_buf[1..size]) {
                             let mut list = cmd_list.lock().unwrap();
-                            *list = commands;
+                            *list = packet.commands;
                         }
                     }
                     Ok(Cpt::Cmd) => {
-                        if let Ok(result) = util::parse_command_response(&recv_buf[1..size]) {
-                            let _ = tx.send((Message::Command(result), Local::now()));
+                        if let Ok(packet) = CommandResponsePacket::deserialize(&recv_buf[1..size]) {
+                            let _ = tx.send((Message::Command(packet.result), Local::now()));
                         }
                     }
                     Ok(Cpt::Eof) => {}

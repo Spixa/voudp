@@ -17,9 +17,11 @@ use crate::{
     commands::CommandSystem,
     console_cmd::{ConsoleCommandResult, handle_command},
     mixer,
-    protocol::{self, ClientPacketType, ConsolePacketType, ControlRequest, IntoPacket, PASSWORD},
+    protocol::{
+        self, ClientPacketType, ConsolePacketType, ControlRequest, FromPacket, IntoPacket, PASSWORD,
+    },
     socket::{self, SecureUdpSocket},
-    util::{self, CommandCategory, CommandContext, CommandResult, ServerCommand},
+    util::{self, CommandCategory, CommandContext, CommandResult, ControlPacket, ServerCommand},
 };
 const JITTER_BUFFER_LEN: usize = 50;
 
@@ -272,8 +274,6 @@ impl ServerState {
 
         let mut command_system = CommandSystem::new();
 
-
-        let config_clone = config.clone();
         command_system.register_command(
             ServerCommand {
                 name: "/info".into(),
@@ -284,12 +284,9 @@ impl ServerState {
                 requires_auth: false,
                 admin_only: false,
             },
-            move |_| {
-                CommandResult::Success(format!("{:#?}", config_clone))
-            },
+            move |_| CommandResult::Success(format!("{:#?}", config)),
         );
 
-        
         Ok(Self {
             socket: Arc::clone(&socket),
             remotes: HashMap::new(),
@@ -698,8 +695,8 @@ impl ServerState {
         let mut remote = remote.lock().unwrap();
 
         type Cq = ControlRequest;
-        match util::parse_control_packet(data) {
-            Ok(req) => match req {
+        match ControlPacket::deserialize(data) {
+            Ok(req) => match req.request {
                 Cq::SetDeafen => remote.status.deaf = true,
                 Cq::SetUndeafen => remote.status.deaf = false,
                 Cq::SetMute => remote.status.mute = true,
@@ -836,7 +833,7 @@ impl ServerState {
         };
 
         let cmd_name = &command.name;
-        if let Some((_, func)) = self.command_system.get_command(&cmd_name) {
+        if let Some((_, func)) = self.command_system.get_command(cmd_name) {
             func(&context)
         } else {
             CommandResult::Silent

@@ -1,7 +1,7 @@
 /*
     Protocol definiton for VoUDP v0.1
 */
-use std::convert::TryFrom;
+use std::{array::TryFromSliceError, convert::TryFrom, string::FromUtf8Error};
 
 pub const VOUDP_SALT: &[u8; 5] = b"voudp";
 pub const PASSWORD: &str = "password";
@@ -145,6 +145,37 @@ impl TryFrom<u8> for ControlRequest {
 
 pub trait IntoPacket {
     fn serialize(&self) -> Vec<u8>;
+}
+
+pub trait FromPacket: Sized {
+    fn deserialize(from: &[u8]) -> Result<Self, PacketError>;
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum PacketError {
+    #[error("Packet too short: expected at least {0} bytes, got {1}")]
+    TooShort(usize, usize),
+
+    #[error("Invalid packet type: {0}")]
+    InvalidType(u8),
+
+    #[error("Invalid UTF-8 string: {0}")]
+    InvalidUtf8(#[from] FromUtf8Error),
+
+    #[error("Invalid slice conversion: {0}")]
+    InvalidSlice(#[from] TryFromSliceError),
+
+    #[error("Missing delimiter 0x01")]
+    MissingDelimiter,
+
+    #[error("Invalid command category: {0}")]
+    InvalidCommandCategory(u8),
+
+    #[error("Buffer underflow at position {0}")]
+    BufferUnderflow(usize),
+
+    #[error("Invalid data: {0}")]
+    InvalidData(String),
 }
 
 pub trait ToBytes {
