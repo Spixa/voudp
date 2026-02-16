@@ -1,7 +1,9 @@
+use rand::seq::IndexedRandom;
 use std::collections::HashMap;
 
 use crate::{
-    server::Channel,
+    server::{Channel, ServerState},
+    socket::SecureUdpSocket,
     util::{CommandCategory, CommandContext, CommandResult, ServerCommand},
 };
 
@@ -18,17 +20,17 @@ pub struct CommandSystem {
 }
 
 impl CommandSystem {
-    pub fn new() -> Self {
+    pub fn new(socket: &SecureUdpSocket) -> Self {
         let mut system = Self {
             commands: HashMap::new(),
             command_aliases: HashMap::new(),
         };
 
-        system.register_default_commands();
+        system.register_default_commands(socket);
         system
     }
 
-    fn register_default_commands(&mut self) {
+    fn register_default_commands(&mut self, socket: &SecureUdpSocket) {
         self.register_command(
             ServerCommand {
                 name: "/test".to_string(),
@@ -50,30 +52,95 @@ impl CommandSystem {
             },
         );
 
-        //     // User commands
-        //     self.register_command(ServerCommand {
-        //         name: "/nick".to_string(),
-        //         description: "Change your nickname".to_string(),
-        //         usage: "/nick <name>".to_string(),
-        //         category: CommandCategory::User,
-        //         aliases: vec!["/name".to_string(), "/username".to_string()],
-        //         requires_auth: false,
-        //         admin_only: false,
-        //     });
+        let socket = socket.clone();
 
-        //     self.register_command(ServerCommand {
-        //         name: "/whoami".to_string(),
-        //         description: "Show your current nickname and channel".to_string(),
-        //         usage: "/whoami".to_string(),
-        //         category: CommandCategory::User,
-        //         aliases: vec![],
-        //         requires_auth: false,
-        //         admin_only: false,
-        //     },
-        // |ctx| {
+        let titles: Vec<String> = vec![
+            "Incase you didn't know".into(),
+            "Did you know that".into(),
+            "You might benefit from knowing this".into(),
+            "Just so you know".into(),
+            "For your information".into(),
+            "Have you heard that".into(),
+            "Just so you know".into(),
+        ];
 
-        //     CommandResult::Silent
-        // });
+        self.register_command(
+            ServerCommand {
+                name: "/me".to_string(),
+                description: "Status command".to_string(),
+                usage: "/me <activity>".to_string(),
+                category: CommandCategory::User,
+                aliases: vec!["/".to_string()],
+                requires_auth: true,
+                admin_only: false,
+            },
+            move |ctx, chans| {
+                if ctx.arguments.is_empty() {
+                    return CommandResult::Silent;
+                }
+
+                let mask = ctx.sender_mask.clone().unwrap();
+                let activity = ctx.arguments.join(" ");
+
+                let mut rng = rand::rng();
+                let title = titles.choose(&mut rng).cloned();
+
+                ServerState::broadcast_channel(
+                    socket.clone(),
+                    chans,
+                    ctx.channel_id,
+                    title.unwrap(),
+                    format!("* {mask} {activity}"),
+                );
+
+                CommandResult::Silent
+            },
+        );
+
+        self.register_command(
+            ServerCommand {
+                name: "/deafen".to_string(),
+                description: "Toggle your speaker deafen".to_string(),
+                usage: "/deafen".to_string(),
+                category: CommandCategory::Audio,
+                aliases: vec![],
+                requires_auth: false,
+                admin_only: false,
+            },
+            |ctx, chans| {
+                if let Some(_) = chans.get(&ctx.channel_id) {
+                    // TODO: add a ServerState::set_remote_deafen() and set_remote_mute() function and use it here
+                }
+
+                CommandResult::Silent
+            },
+        );
+
+        self.register_command(
+            ServerCommand {
+                name: "/whoami".to_string(),
+                description: "Show your current nickname and channel".to_string(),
+                usage: "/whoami".to_string(),
+                category: CommandCategory::User,
+                aliases: vec![],
+                requires_auth: true,
+                admin_only: false,
+            },
+            |ctx, chans| {
+                if let Some(channel) = chans.get(&ctx.channel_id) {
+                    return CommandResult::Success(format!(
+                        "You are @{} in {}",
+                        ctx.sender_mask.clone().unwrap(),
+                        if let Some(name) = &channel.name {
+                            format!("#{name}")
+                        } else {
+                            format!("unnamed channel with id {}", ctx.channel_id)
+                        }
+                    ));
+                }
+                CommandResult::Silent
+            },
+        );
 
         //     self.register_command(ServerCommand {
         //         name: "/join".to_string(),

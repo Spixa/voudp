@@ -74,9 +74,9 @@ impl ServerConfig {
 }
 
 #[derive(Default, Clone, Copy)]
-struct RemoteStatus {
-    deaf: bool,
-    mute: bool,
+pub struct RemoteStatus {
+    pub deaf: bool,
+    pub mute: bool,
 }
 
 pub struct Remote {
@@ -87,7 +87,7 @@ pub struct Remote {
     pub(crate) addr: SocketAddr,
     mask: Option<String>,
     jitter_buffer: VecDeque<Vec<f32>>,
-    status: RemoteStatus,
+    pub(crate) status: RemoteStatus,
 }
 
 impl Remote {
@@ -274,7 +274,7 @@ impl ServerState {
         default_channels.insert(2, Channel::new(config, String::from("music"), 2));
         default_channels.insert(3, Channel::new(config, String::from("test"), 3));
 
-        let mut command_system = CommandSystem::new();
+        let mut command_system = CommandSystem::new(&socket);
 
         let socket_clone = socket.clone();
         command_system.register_command(
@@ -296,7 +296,7 @@ impl ServerState {
                 description: "Broadcast inside channel".into(),
                 usage: "/broadcast <message>".into(),
                 category: CommandCategory::Admin,
-                aliases: vec![],
+                aliases: vec!["/b".into(), "/broad".into()],
                 requires_auth: true,
                 admin_only: false,
             },
@@ -977,7 +977,7 @@ impl ServerState {
         self.handle_eof(addr);
     }
 
-    fn broadcast_channel(
+    pub fn broadcast_channel(
         socket: SecureUdpSocket,
         channels: &mut HashMap<u32, Channel>,
         channel_id: u32,

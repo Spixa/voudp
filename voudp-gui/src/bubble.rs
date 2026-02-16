@@ -72,6 +72,53 @@ pub fn badge(ui: &mut egui::Ui, text: impl Into<String>, color: egui::Color32) {
         });
 }
 
+pub fn connection_activity_wifi(ui: &mut egui::Ui, size: f32, color: egui::Color32) {
+    let arc_count = 3;
+    let segments = 90;
+
+    let (rect, _) = ui.allocate_exact_size(egui::vec2(size, size), egui::Sense::hover());
+
+    let painter = ui.painter_at(rect);
+    let center = rect.center();
+
+    let time = ui.input(|i| i.time);
+    let active_arcs = ((time * 0.4) % 1.0 * arc_count as f64).floor() as usize;
+
+    // ===== SIZING =====
+    let dot_radius = size * 0.06;
+    let arc_thickness = size * 0.075;
+    let arc_gap = size * 0.06;
+
+    let first_arc_radius = dot_radius + arc_gap + arc_thickness * 0.5;
+
+    // Push upward to fill square nicely
+    let vertical_shift = size * 0.12;
+    let origin = center + egui::vec2(0.0, vertical_shift);
+
+    // ===== DRAW ARCS (ONLY ACTIVE ONES) =====
+    for i in 0..=active_arcs.min(arc_count - 1) {
+        let radius = first_arc_radius + i as f32 * (arc_thickness + arc_gap);
+
+        let stroke = egui::Stroke::new(arc_thickness, color);
+        let mut points = Vec::with_capacity(segments);
+
+        let start = std::f32::consts::PI * 1.15;
+        let end = std::f32::consts::PI * 1.85;
+
+        for s in 0..segments {
+            let t = s as f32 / (segments - 1) as f32;
+            let a = start + t * (end - start);
+
+            points.push(origin + egui::vec2(radius * a.cos(), radius * a.sin()));
+        }
+
+        painter.add(egui::Shape::line(points, stroke));
+    }
+
+    // ===== BASE DOT (ALWAYS VISIBLE) =====
+    painter.circle_filled(origin, dot_radius, color);
+}
+
 fn _name_color(_: &str) -> egui::Color32 {
     Color32::YELLOW
 }

@@ -20,7 +20,9 @@ use voudp::{
     util::{CommandResult, ServerCommand},
 };
 
-use crate::bubble::{badge, bubble_ui, parse_chat_message, parse_system_message};
+use crate::bubble::{
+    badge, bubble_ui, connection_activity_wifi, parse_chat_message, parse_system_message,
+};
 
 fn main() -> Result<()> {
     pretty_env_logger::init_timed();
@@ -430,7 +432,7 @@ impl eframe::App for GuiClientApp {
                                         }
                                     }
 
-                                    self.request_global_list();
+                                    // self.request_global_list();
 
                                     let file = match File::create_new(".voudp") {
                                         Ok(file) => Some(file),
@@ -526,7 +528,7 @@ impl eframe::App for GuiClientApp {
                     ui.add_space(6.0);
 
                     // ===== Scrollable channel list =====
-                    let footer_height = 48.0; // just enough for emojis
+                    let footer_height = 64.0; // just enough for emojis
                     let max_scroll_height = (ui.available_height() - footer_height).max(0.0);
 
                     egui::ScrollArea::vertical()
@@ -679,6 +681,19 @@ impl eframe::App for GuiClientApp {
                         });
 
                     // ===== Footer (Ping + text buttons) =====
+
+                    ui.horizontal(|ui| {
+                        if !self.muted {
+                            connection_activity_wifi(ui, 18.0, Color32::LIGHT_GREEN);
+                            ui.label("Streaming audio...");
+                        } else if !self.deafened {
+                            ui.label("Audio stream paused");
+                        } else {
+                            ui.label(RichText::new("⚡").color(Color32::YELLOW).size(14.0));
+                            ui.label("Low bandwidth mode");
+                        }
+                    });
+
                     ui.add_space(2.0);
                     ui.separator();
                     ui.add_space(2.0);
@@ -699,7 +714,6 @@ impl eframe::App for GuiClientApp {
                                     .color(color),
                             );
                         }
-
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             let btn_size = [60.0, 25.0]; // slightly smaller buttons
 
@@ -867,10 +881,7 @@ impl eframe::App for GuiClientApp {
                                         );
 
                                         ui.label(
-                                            egui::RichText::new(content)
-                                                .color(*color)
-                                                .size(12.0)
-                                                .italics(),
+                                            egui::RichText::new(content).color(*color).size(12.0),
                                         );
                                         ui.style_mut().wrap = None;
 

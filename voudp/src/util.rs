@@ -438,10 +438,6 @@ impl FromPacket for BroadcastPacket {
                     .ok_or(PacketError::MissingDelimiter)?
                     + 1;
 
-                if delimiter_pos == 1 {
-                    return Err(PacketError::InvalidData("username is empty".into()));
-                }
-
                 let title = String::from_utf8(bytes[1..delimiter_pos].to_vec())?;
                 let content = String::from_utf8(bytes[delimiter_pos + 1..].to_vec())?;
 
