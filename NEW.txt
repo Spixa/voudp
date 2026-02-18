@@ -1,5 +1,0 @@
-* Ping display
-* Named channels
-* Cached info of last server on GUI client
-* Improved UI
-* Renicking is a thing
