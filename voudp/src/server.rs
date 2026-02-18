@@ -7,9 +7,14 @@ use ringbuf::{
 };
 use std::{
     collections::{HashMap, VecDeque},
-    io,
+    fs, io,
     net::SocketAddr,
-    sync::{Arc, Mutex},
+    ops::Not,
+    path::Path,
+    sync::{
+        Arc, Mutex,
+        mpsc::{self, Receiver},
+    },
     time::{Duration, Instant},
 };
 
@@ -17,6 +22,7 @@ use crate::{
     commands::CommandSystem,
     console_cmd::{ConsoleCommandResult, handle_command},
     mixer,
+    plugin::{PluginAction, PluginManager},
     protocol::{
         self, ClientPacketType, ConsolePacketType, ControlRequest, FromPacket, IntoPacket, PASSWORD,
     },
@@ -139,7 +145,10 @@ pub struct Channel {
 
 impl Channel {
     pub fn new(server_config: ServerConfig, name: String, _id: u32) -> Self {
-        info!("Created new channel with {_id}");
+        info!(
+            "Created new channel #{name} with internal id {_id} ({:1}kHz stereo with text chatting)",
+            server_config.sample_rate as f32 / 1000.0
+        );
         Self {
             name: Some(name),
             _id,
@@ -255,6 +264,8 @@ pub struct ServerState {
     audio_rb: HeapRb<(SocketAddr, Vec<u8>)>,
     config: ServerConfig,
     command_system: CommandSystem,
+    plugin_manager: PluginManager,
+    plugin_rx: Receiver<PluginAction>,
 }
 
 impl ServerState {
@@ -275,6 +286,8 @@ impl ServerState {
         default_channels.insert(3, Channel::new(config, String::from("test"), 3));
 
         let mut command_system = CommandSystem::new(&socket);
+
+        let (plugin_tx, plugin_rx) = mpsc::channel::<PluginAction>();
 
         let socket_clone = socket.clone();
         command_system.register_command(
@@ -362,6 +375,20 @@ impl ServerState {
 
         let socket = Arc::new(socket); // wrap in Arc
 
+        let mut plugin_manager = PluginManager::new(plugin_tx.clone());
+
+        let plugins_dir = Path::new("plugins");
+        if plugins_dir.exists() && plugins_dir.is_dir() {
+            for entry in fs::read_dir(plugins_dir)
+                .expect("Failed to read plugins directory")
+                .flatten()
+            {
+                let path = entry.path();
+                if path.extension().and_then(|s| s.to_str()) == Some("lua") {
+                    plugin_manager.load_plugin(&path);
+                }
+            }
+        }
         Ok(Self {
             socket: Arc::clone(&socket),
             remotes: HashMap::new(),
@@ -370,6 +397,8 @@ impl ServerState {
             audio_rb: HeapRb::new(config.max_users),
             config,
             command_system,
+            plugin_manager,
+            plugin_rx,
         })
     }
 
@@ -732,6 +761,15 @@ impl ServerState {
                 }
 
                 let sender_addr = addr;
+                if self
+                    .plugin_manager
+                    .dispatch_message(mask.as_str(), msg.as_str())
+                    .not()
+                {
+                    info!("plugins have overriden {mask} from sending '{msg}'");
+                    return;
+                }
+
                 for remote in channel.remotes.iter() {
                     let addr = { remote.lock().unwrap().addr };
                     let is_self = addr.eq(&sender_addr);
@@ -1095,6 +1133,34 @@ impl ServerState {
         });
     }
 
+    fn plugins_update(&mut self) {
+        while let Ok(action) = self.plugin_rx.try_recv() {
+            match action {
+                PluginAction::Reply { to, msg } => {
+                    if let Some((addr, _)) = self
+                        .remotes
+                        .iter()
+                        .find(|r| r.1.lock().unwrap().mask.clone().is_some_and(|m| m == to))
+                    {
+                        Self::dm(&self.socket, *addr, msg);
+                    }
+                }
+                PluginAction::Broadcast { msg: _ } => {
+                    todo!()
+                }
+                PluginAction::Kick { user, reason } => {
+                    if let Some((addr, _)) = self
+                        .remotes
+                        .iter()
+                        .find(|r| r.1.lock().unwrap().mask.clone().is_some_and(|m| m == user))
+                    {
+                        self.kick_socket(*addr, reason);
+                    }
+                }
+            }
+        }
+    }
+
     pub fn run(&mut self) {
         let mut buf = [0u8; 2048];
         let mut next_tick = Instant::now();
@@ -1154,6 +1220,8 @@ impl ServerState {
                     }
                 }
             }
+
+            self.plugins_update();
 
             if Instant::now() >= next_tick {
                 self.process_audio_tick();

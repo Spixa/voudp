@@ -685,7 +685,14 @@ impl eframe::App for GuiClientApp {
                     ui.horizontal(|ui| {
                         if !self.muted {
                             connection_activity_wifi(ui, 18.0, Color32::LIGHT_GREEN);
-                            ui.label("Streaming audio...");
+
+                            let idevice_name = if let Some(client) = &self.client {
+                                client.lock().unwrap().devices.lock().unwrap().input.clone()
+                            } else {
+                                String::new()
+                            };
+
+                            ui.label(format!("Streaming audio from {idevice_name}..."));
                         } else if !self.deafened {
                             ui.label("Audio stream paused");
                         } else {

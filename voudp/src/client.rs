@@ -31,6 +31,12 @@ pub enum State {
     Kicked(String),
 }
 
+#[derive(Clone, Default)]
+pub struct AudioDevices {
+    pub input: String,
+    pub output: String,
+}
+
 pub struct ClientState {
     pub socket: SecureUdpSocket,
     muted: Arc<AtomicBool>,
@@ -43,6 +49,7 @@ pub struct ClientState {
     pub rx: Option<Receiver<OwnedMessage>>,
     pub state: Arc<Mutex<State>>,
     pub cmd_list: SafeCommandList,
+    pub devices: Arc<Mutex<AudioDevices>>,
 }
 
 type OwnedMessage = (Message, DateTime<Local>);
@@ -89,6 +96,7 @@ impl ClientState {
             rx: None,
             state: Arc::new(Mutex::new(State::Fine)),
             cmd_list: Arc::new(Mutex::new(vec![])),
+            devices: Arc::new(Mutex::new(AudioDevices::default())),
         })
     }
 
@@ -113,6 +121,7 @@ impl ClientState {
         let talking = self.talking.clone();
         let (tx, rx) = mpsc::channel::<OwnedMessage>();
         let ping = self.ping.clone();
+        let devices = self.devices.clone();
 
         self.rx = Some(rx);
         let id = { self.channel_id.lock().unwrap() };
@@ -121,7 +130,7 @@ impl ClientState {
                 self.join(*id)?;
                 Self::start_audio(
                     socket, muted, deafened, connected, state, list, cmd_list, tx, mode, talking,
-                    ping,
+                    ping, devices,
                 )?;
             }
             Mode::Gui => {
@@ -137,7 +146,7 @@ impl ClientState {
                     }
                     if let Err(e) = Self::start_audio(
                         socket, muted, deafened, connected, state, list, cmd_list, tx, mode,
-                        talking, ping,
+                        talking, ping, devices,
                     ) {
                         eprintln!("audio thread error: {e:?}");
                     }
@@ -161,6 +170,7 @@ impl ClientState {
         mode: Mode,
         talking: Arc<AtomicBool>,
         ping: Arc<AtomicU16>,
+        devices: Arc<Mutex<AudioDevices>>,
     ) -> Result<()> {
         let muted_clone = muted.clone();
         let deafened_clone = deafened.clone();
@@ -200,8 +210,15 @@ impl ClientState {
         }
 
         let host = cpal::default_host();
+
         let input_device = host.default_input_device().context("no input device")?;
         let output_device = host.default_output_device().context("no output device")?;
+
+        {
+            let mut dev = devices.lock().unwrap();
+            dev.input = input_device.name().unwrap_or("Unknown".into());
+            dev.output = output_device.name().unwrap_or("Unknown".into());
+        }
 
         let supported = input_device.supported_input_configs()?;
 

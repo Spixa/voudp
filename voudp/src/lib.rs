@@ -3,6 +3,7 @@ pub mod commands;
 pub mod console_cmd;
 pub mod mixer;
 pub mod music;
+pub mod plugin;
 pub mod protocol;
 pub mod server;
 pub mod socket;

@@ -107,10 +107,10 @@ impl CommandSystem {
                 requires_auth: false,
                 admin_only: false,
             },
-            |ctx, chans| {
-                if let Some(_) = chans.get(&ctx.channel_id) {
-                    // TODO: add a ServerState::set_remote_deafen() and set_remote_mute() function and use it here
-                }
+            |_, _| {
+                // if let Some(_) = chans.get(&ctx.channel_id) {
+                //     // TODO: add a ServerState::set_remote_deafen() and set_remote_mute() function and use it here
+                // }
 
                 CommandResult::Silent
             },

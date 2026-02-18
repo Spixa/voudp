@@ -647,6 +647,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "bstr"
+version = "1.12.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "63044e1ae8e69f3b5a92c736ca6269b8d12fa7efe39bf34ddb06d102cf0e2cab"
+dependencies = [
+ "memchr",
+ "serde",
+]
+
+[[package]]
 name = "bumpalo"
 version = "3.19.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1422,6 +1432,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "env_home"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c7f84e12ccf0a7ddc17a6c41c93326024c42920d7ee630d04950e6926645c0fe"
+
+[[package]]
 name = "env_logger"
 version = "0.10.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1509,12 +1525,6 @@ dependencies = [
  "event-listener 5.4.1",
  "pin-project-lite",
 ]
-
-[[package]]
-name = "extended"
-version = "0.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "af9673d8203fcb076b19dfd17e38b3d4ae9f44959416ea532ce72415a6020365"
 
 [[package]]
 name = "fastrand"
@@ -2357,6 +2367,25 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e5032e24019045c762d3c0f28f5b6b8bbf38563a65908389bf7978758920897"
 
 [[package]]
+name = "lua-src"
+version = "547.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1edaf29e3517b49b8b746701e5648ccb5785cde1c119062cbabbc5d5cd115e42"
+dependencies = [
+ "cc",
+]
+
+[[package]]
+name = "luajit-src"
+version = "210.5.12+a4f56a4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b3a8e7962a5368d5f264d045a5a255e90f9aa3fc1941ae15a8d2940d42cac671"
+dependencies = [
+ "cc",
+ "which",
+]
+
+[[package]]
 name = "mach2"
 version = "0.4.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2448,6 +2477,32 @@ dependencies = [
  "log",
  "wasi",
  "windows-sys 0.48.0",
+]
+
+[[package]]
+name = "mlua"
+version = "0.9.9"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d111deb18a9c9bd33e1541309f4742523bfab01d276bfa9a27519f6de9c11dc7"
+dependencies = [
+ "bstr",
+ "mlua-sys",
+ "num-traits",
+ "once_cell",
+ "rustc-hash 2.1.1",
+]
+
+[[package]]
+name = "mlua-sys"
+version = "0.6.8"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "380c1f7e2099cafcf40e51d3a9f20a346977587aa4d012eae1f043149a728a93"
+dependencies = [
+ "cc",
+ "cfg-if",
+ "lua-src",
+ "luajit-src",
+ "pkg-config",
 ]
 
 [[package]]
@@ -3575,27 +3630,25 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "symphonia"
-version = "0.5.5"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5773a4c030a19d9bfaa090f49746ff35c75dfddfa700df7a5939d5e076a57039"
+checksum = "a7e5f38aa07e792f4eebb0faa93cee088ec82c48222dd332897aae1569d9a4b7"
 dependencies = [
  "lazy_static",
  "symphonia-bundle-flac",
- "symphonia-codec-adpcm",
  "symphonia-codec-pcm",
  "symphonia-codec-vorbis",
  "symphonia-core",
- "symphonia-format-mkv",
  "symphonia-format-ogg",
- "symphonia-format-riff",
+ "symphonia-format-wav",
  "symphonia-metadata",
 ]
 
 [[package]]
 name = "symphonia-bundle-flac"
-version = "0.5.5"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c91565e180aea25d9b80a910c546802526ffd0072d0b8974e3ebe59b686c9976"
+checksum = "116e5412f5fb4e5d07efd6628d50d6fcd7a61ebef43d98f5012f3cf763b25d02"
 dependencies = [
  "log",
  "symphonia-core",
@@ -3604,20 +3657,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "symphonia-codec-adpcm"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2dddc50e2bbea4cfe027441eece77c46b9f319748605ab8f3443350129ddd07f"
-dependencies = [
- "log",
- "symphonia-core",
-]
-
-[[package]]
 name = "symphonia-codec-pcm"
-version = "0.5.5"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4e89d716c01541ad3ebe7c91ce4c8d38a7cf266a3f7b2f090b108fb0cb031d95"
+checksum = "ba1d54738758993546107e3a4be2c1da827f2d4489fcffee0fa47867254e44c7"
 dependencies = [
  "log",
  "symphonia-core",
@@ -3625,9 +3668,9 @@ dependencies = [
 
 [[package]]
 name = "symphonia-codec-vorbis"
-version = "0.5.5"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f025837c309cd69ffef572750b4a2257b59552c5399a5e49707cc5b1b85d1c73"
+checksum = "a29ed6748078effb35a05064a451493a78038918981dc1a76bdf5a2752d441fa"
 dependencies = [
  "log",
  "symphonia-core",
@@ -3636,9 +3679,9 @@ dependencies = [
 
 [[package]]
 name = "symphonia-core"
-version = "0.5.5"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ea00cc4f79b7f6bb7ff87eddc065a1066f3a43fe1875979056672c9ef948c2af"
+checksum = "fa135e97be0f4a666c31dfe5ef4c75435ba3d355fd6a73d2100aa79b14c104c9"
 dependencies = [
  "arrayvec",
  "bitflags 1.3.2",
@@ -3648,23 +3691,10 @@ dependencies = [
 ]
 
 [[package]]
-name = "symphonia-format-mkv"
-version = "0.5.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "122d786d2c43a49beb6f397551b4a050d8229eaa54c7ddf9ee4b98899b8742d0"
-dependencies = [
- "lazy_static",
- "log",
- "symphonia-core",
- "symphonia-metadata",
- "symphonia-utils-xiph",
-]
-
-[[package]]
 name = "symphonia-format-ogg"
-version = "0.5.5"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2b4955c67c1ed3aa8ae8428d04ca8397fbef6a19b2b051e73b5da8b1435639cb"
+checksum = "d7b2357288a79adfec532cfd86049696cfa5c58efeff83bd51687a528f18a519"
 dependencies = [
  "log",
  "symphonia-core",
@@ -3673,12 +3703,11 @@ dependencies = [
 ]
 
 [[package]]
-name = "symphonia-format-riff"
-version = "0.5.5"
+name = "symphonia-format-wav"
+version = "0.4.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2d7c3df0e7d94efb68401d81906eae73c02b40d5ec1a141962c592d0f11a96f"
+checksum = "6d9fa5e5b420dea6763ba2547887eb1a02a142c676c5b02ed1b113a247101dad"
 dependencies = [
- "extended",
  "log",
  "symphonia-core",
  "symphonia-metadata",
@@ -3686,9 +3715,9 @@ dependencies = [
 
 [[package]]
 name = "symphonia-metadata"
-version = "0.5.5"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "36306ff42b9ffe6e5afc99d49e121e0bd62fe79b9db7b9681d48e29fa19e6b16"
+checksum = "5260599daba18d8fe905ca3eb3b42ba210529a6276886632412cc74984e79b1a"
 dependencies = [
  "encoding_rs",
  "lazy_static",
@@ -3698,9 +3727,9 @@ dependencies = [
 
 [[package]]
 name = "symphonia-utils-xiph"
-version = "0.5.5"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ee27c85ab799a338446b68eec77abf42e1a6f1bb490656e121c6e27bfbab9f16"
+checksum = "6a37026c6948ff842e0bf94b4008579cc71ab16ed0ff9ca70a331f60f4f1e1e9"
 dependencies = [
  "symphonia-core",
  "symphonia-metadata",
@@ -4020,6 +4049,7 @@ dependencies = [
  "chrono",
  "cpal",
  "log",
+ "mlua",
  "opus2",
  "pbkdf2",
  "rand 0.10.0",
@@ -4495,6 +4525,18 @@ dependencies = [
  "bitflags 2.10.0",
  "js-sys",
  "web-sys",
+]
+
+[[package]]
+name = "which"
+version = "7.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "24d643ce3fd3e5b54854602a080f34fb10ab75e0b813ee32d00ca2b44fa74762"
+dependencies = [
+ "either",
+ "env_home",
+ "rustix 1.1.3",
+ "winsafe",
 ]
 
 [[package]]
@@ -5028,6 +5070,12 @@ checksum = "5a5364e9d77fcdeeaa6062ced926ee3381faa2ee02d3eb83a5c27a8825540829"
 dependencies = [
  "memchr",
 ]
+
+[[package]]
+name = "winsafe"
+version = "0.0.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d135d17ab770252ad95e9a872d365cf3090e3be864a34ab46f48555993efc904"
 
 [[package]]
 name = "wit-bindgen"
