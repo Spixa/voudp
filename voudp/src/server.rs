@@ -1,4 +1,3 @@
-use chrono::Local;
 use log::{error, info, warn};
 use opus2::{Application, Channels as OpusChannels, Decoder, Encoder};
 use ringbuf::{
@@ -505,19 +504,18 @@ impl ServerState {
 
         info!("{} has joined the channel with id {}", addr, chan_id);
 
-        if !self.remotes.contains_key(&addr) {
-            Self::dm(
-                &self.socket,
+        if !self.remotes.contains_key(&addr) && !self.plugin_manager.dispatch_join(addr, chan_id) {
+            info!("Plugins prevented {addr} from joining");
+            self.kick_socket(
                 addr,
-                format!(
-                    "Welcome to this server. Server time is {}",
-                    Local::now().format("%d/%m/%Y %H:%M:%S")
-                ),
+                Some("Server plugins blocked you from joining".to_owned()),
             );
+            return;
         }
 
         let remote = self.remotes.entry(addr).or_insert_with(|| {
             info!("{} is a new remote", addr);
+
             Arc::new(Mutex::new(
                 Remote::new(addr, self.config.sample_rate).expect("remote creation failed"),
             ))
@@ -766,7 +764,7 @@ impl ServerState {
                     .dispatch_message(mask.as_str(), msg.as_str())
                     .not()
                 {
-                    info!("plugins have overriden {mask} from sending '{msg}'");
+                    info!("Plugins have prevented {mask} from sending '{msg}'");
                     return;
                 }
 
@@ -1002,9 +1000,13 @@ impl ServerState {
 
     fn kick_socket(&mut self, addr: SocketAddr, reason: Option<String>) {
         if !self.remotes.contains_key(&addr) {
-            warn!("{} is not a registered client to kick!", addr);
-            return;
-        };
+            info!(
+                "{} is not a registered client to kick, sending request anyway...",
+                addr
+            );
+        } else {
+            info!("Kicked {addr}");
+        }
 
         let mut packet = vec![ClientPacketType::Kick as u8];
         if let Some(reason) = reason {
@@ -1144,6 +1146,9 @@ impl ServerState {
                     {
                         Self::dm(&self.socket, *addr, msg);
                     }
+                }
+                PluginAction::ReplyByAddr { to, msg } => {
+                    Self::dm(&self.socket, to, msg);
                 }
                 PluginAction::Broadcast { msg: _ } => {
                     todo!()

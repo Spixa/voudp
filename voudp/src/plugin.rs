@@ -1,4 +1,5 @@
 use std::{
+    net::SocketAddr,
     path::Path,
     sync::{
         Arc,
@@ -7,12 +8,19 @@ use std::{
     },
 };
 
+use chrono::Local;
 use log::{error, info};
 use mlua::{Lua, RegistryKey, UserData, UserDataMethods};
+
+use crate::protocol;
 
 pub enum PluginAction {
     Reply {
         to: String,
+        msg: String,
+    },
+    ReplyByAddr {
+        to: SocketAddr,
         msg: String,
     },
     Broadcast {
@@ -33,13 +41,27 @@ pub struct PluginMetadata {
 }
 
 pub struct JoinContext {
-    _username: String,
+    pub addr: SocketAddr,
+    pub channel_id: u32,
+    cancelled: Arc<AtomicBool>,
+    tx: Sender<PluginAction>,
 }
 
 impl UserData for JoinContext {
     fn add_methods<'lua, M: UserDataMethods<'lua, Self>>(methods: &mut M) {
-        methods.add_method("broadcast", |_, _, msg: String| {
-            println!("[broadcast] {}", msg);
+        methods.add_method("reply", |_, ctx, msg: String| {
+            ctx.tx
+                .send(PluginAction::ReplyByAddr { to: ctx.addr, msg })
+                .ok();
+            Ok(())
+        });
+        methods.add_method("get_addr", |_, ctx, ()| Ok(ctx.addr.to_string().clone()));
+        methods.add_method("get_channel_id", |_, ctx, ()| {
+            Ok(ctx.channel_id.to_string())
+        });
+
+        methods.add_method("cancel", |_, ctx, ()| {
+            ctx.cancelled.store(true, Ordering::SeqCst);
             Ok(())
         });
     }
@@ -122,6 +144,23 @@ impl Plugin {
         let (metadata, on_join, on_message, on_leave) = {
             let globals = lua.globals();
 
+            let core = lua.create_table()?;
+            core.set(
+                "starts_with",
+                lua.create_function(|_, (s, prefix): (String, String)| Ok(s.starts_with(&prefix)))?,
+            )?;
+
+            core.set(
+                "system_time",
+                lua.create_function(|_, ()| {
+                    Ok(Local::now().format("%Y-%m-%d %H:%M:%S").to_string())
+                })?,
+            )?;
+
+            core.set("LOOPBACK", "127.0.0.1")?;
+            core.set("PROTOCOL_VERSION", protocol::VERSION)?;
+
+            globals.set("Core", core)?;
             // --- metadata ---
             let plugin_table: mlua::Table = globals.get("plugin")?;
 
@@ -191,7 +230,7 @@ impl PluginManager {
                     if let Some(ref author) = plugin.metadata.author {
                         format!("written by {}", author)
                     } else {
-                        "".into()
+                        "by an author whose ".into()
                     },
                     if let Some(ref desc) = plugin.metadata.description {
                         format!("\n\tDescription: {desc}")
@@ -207,7 +246,9 @@ impl PluginManager {
         }
     }
 
-    pub fn dispatch_join(&self, username: &str) {
+    pub fn dispatch_join(&self, addr: SocketAddr, channel_id: u32) -> bool {
+        let cancelled = Arc::new(AtomicBool::new(false)); // joining isnt cancelled by default
+
         for plugin in &self.plugins {
             if let Some(key) = &plugin.on_join {
                 let func: mlua::Function = match plugin.lua.registry_value(key) {
@@ -219,14 +260,22 @@ impl PluginManager {
                 };
 
                 let ctx = JoinContext {
-                    _username: username.to_string(),
+                    addr,
+                    channel_id,
+                    cancelled: cancelled.clone(),
+                    tx: self.sender.clone(),
                 };
 
                 if let Err(e) = func.call::<_, ()>(ctx) {
                     eprintln!("{} on_join error: {}", plugin.metadata.name, e);
                 }
+
+                if cancelled.load(Ordering::SeqCst) {
+                    return false;
+                }
             }
         }
+        true
     }
 
     pub fn dispatch_message(&self, username: &str, message: &str) -> bool {

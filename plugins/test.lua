@@ -1,7 +1,7 @@
 ---@diagnostic disable: lowercase-global
 
 plugin = {
-    name = "test",
+    name = "Test",
     version = "1.0",
     author = "spixa",
     description = "Test plugin"
@@ -14,11 +14,8 @@ local bad_words = {
     "tinskin"
 }
 
--- required to be a valid plugin
-function on_join(ctx) end
-function on_leave(ctx) end
-
 local swear_count = {}
+-- local banned_ips = {}
 local max_swears = 5
 function on_message(ctx)
     local message = ctx:get_message()

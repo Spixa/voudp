@@ -5,6 +5,7 @@ use std::{array::TryFromSliceError, convert::TryFrom, string::FromUtf8Error};
 
 pub const VOUDP_SALT: &[u8; 5] = b"voudp";
 pub const PASSWORD: &str = "password";
+pub const VERSION: &str = "0.2";
 
 // internal flags for packet processing:
 pub const RELIABLE_FLAG: u8 = 0x80;
