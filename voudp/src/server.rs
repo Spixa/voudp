@@ -269,6 +269,7 @@ pub struct ServerState {
 
 impl ServerState {
     pub fn new(config: ServerConfig, phrase: &[u8]) -> Result<Self, io::Error> {
+        info!("v{} VoUDP protocol server", protocol::VERSION);
         info!("Deriving key from phrase...");
         let key = socket::derive_key_from_phrase(phrase, protocol::VOUDP_SALT);
         let socket = SecureUdpSocket::create(format!("0.0.0.0:{}", config.bind_port), key)?;
@@ -387,7 +388,12 @@ impl ServerState {
                     plugin_manager.load_plugin(&path);
                 }
             }
+        } else {
+            warn!("Directory `./plugins` does not exist");
         }
+
+        plugin_manager.log_loaded();
+
         Ok(Self {
             socket: Arc::clone(&socket),
             remotes: HashMap::new(),
@@ -1211,6 +1217,7 @@ impl ServerState {
             Clipping::Hard => info!("Samples are set to be hard-clipped"),
         }
 
+        info!("Listening for join requests...");
         loop {
             loop {
                 match self.socket.recv_from(&mut buf) {

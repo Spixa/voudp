@@ -32,6 +32,7 @@ function on_message(ctx)
 
             if swear_count[user] >= max_swears then
                 ctx:kick("Your message contained bad language! If this is not intended by the administrator tell them to remove the `test.lua` plugin")
+                swear_count[user] = 0
             end
 
             return  -- shortcircuit

@@ -216,6 +216,18 @@ impl PluginManager {
         }
     }
 
+    pub fn log_loaded(&mut self) {
+        let count = self.plugins.len();
+
+        let plugins_info = self
+            .plugins
+            .iter()
+            .map(|plugin| plugin.metadata.name.clone())
+            .collect::<Vec<String>>();
+
+        info!("Plugins ({count}): {}", plugins_info.join(", "));
+    }
+
     pub fn load_plugin(&mut self, path: &Path) {
         match Plugin::load(path) {
             Ok(plugin) => {
