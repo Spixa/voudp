@@ -266,7 +266,7 @@ impl PluginManager {
                 let func: mlua::Function = match plugin.lua.registry_value(key) {
                     Ok(f) => f,
                     Err(e) => {
-                        eprintln!("{}: {}", plugin.metadata.name, e);
+                        error!("{}: {}", plugin.metadata.name, e);
                         continue;
                     }
                 };
@@ -279,7 +279,7 @@ impl PluginManager {
                 };
 
                 if let Err(e) = func.call::<_, ()>(ctx) {
-                    eprintln!("{} on_join error: {}", plugin.metadata.name, e);
+                    error!("{} on_join error: {}", plugin.metadata.name, e);
                 }
 
                 if cancelled.load(Ordering::SeqCst) {
@@ -299,7 +299,7 @@ impl PluginManager {
                 let func: mlua::Function = match plugin.lua.registry_value(key) {
                     Ok(f) => f,
                     Err(e) => {
-                        eprintln!("{}: {}", plugin.metadata.name, e);
+                        error!("{}: {}", plugin.metadata.name, e);
                         continue;
                     }
                 };
@@ -312,7 +312,7 @@ impl PluginManager {
                 };
 
                 if let Err(e) = func.call::<_, ()>(ctx) {
-                    eprintln!("{} on_message error: {}", plugin.metadata.name, e);
+                    error!("{} on_message error: {}", plugin.metadata.name, e);
                 }
 
                 if cancelled.load(Ordering::SeqCst) {
@@ -330,7 +330,7 @@ impl PluginManager {
                 let func: mlua::Function = match plugin.lua.registry_value(key) {
                     Ok(f) => f,
                     Err(e) => {
-                        eprintln!("{}: {}", plugin.metadata.name, e);
+                        error!("{}: {}", plugin.metadata.name, e);
                         continue;
                     }
                 };
@@ -340,7 +340,7 @@ impl PluginManager {
                 };
 
                 if let Err(e) = func.call::<_, ()>(ctx) {
-                    eprintln!("{} on_leave error: {}", plugin.metadata.name, e);
+                    error!("{} on_leave error: {}", plugin.metadata.name, e);
                 }
             }
         }
