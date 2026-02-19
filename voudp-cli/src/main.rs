@@ -162,6 +162,7 @@ fn main() -> Result<()> {
                 throttle_millis,
                 sample_rate,
                 tickrate,
+                ..Default::default()
             };
             init_logger();
             let mut server = ServerState::new(config, &phrase.into_bytes())?;

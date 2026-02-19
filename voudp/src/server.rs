@@ -52,6 +52,7 @@ pub struct ServerConfig {
     pub throttle_millis: u64,
     pub sample_rate: u32,
     pub tickrate: u32,
+    pub current_tick: u32,
 }
 
 impl Default for ServerConfig {
@@ -68,6 +69,7 @@ impl Default for ServerConfig {
             throttle_millis: 1,
             sample_rate: 48000,
             tickrate: 50,
+            current_tick: 0,
         }
     }
 }
@@ -97,8 +99,13 @@ pub struct Remote {
 
 impl Remote {
     fn new(addr: SocketAddr, sample_rate: u32) -> Result<Self, opus2::Error> {
-        let encoder = Encoder::new(sample_rate, OpusChannels::Stereo, Application::Audio)?;
+        let mut encoder = Encoder::new(sample_rate, OpusChannels::Stereo, Application::Audio)?;
         let decoder = Decoder::new(sample_rate, OpusChannels::Stereo)?;
+
+        encoder.set_inband_fec(true)?;
+        encoder.set_bitrate(opus2::Bitrate::Bits(96000))?;
+        encoder.set_vbr(true)?;
+        encoder.set_packet_loss_perc(10)?;
 
         info!(
             "New remote has initialized with addr {} (sample rate: {}, audio: {})",
@@ -241,6 +248,7 @@ impl Channel {
 
             if len > 0 {
                 let mut packet = vec![0x02];
+                packet.extend_from_slice(&self.server_config.current_tick.to_be_bytes());
                 packet.extend_from_slice(&encoded[..len]);
                 if let Err(e) = socket.send_to(&packet, remote_addr) {
                     error!("Failed to send audio to {remote_addr}: {e}");
@@ -1236,6 +1244,7 @@ impl ServerState {
             self.plugins_update();
 
             if Instant::now() >= next_tick {
+                self.config.current_tick += 1;
                 self.process_audio_tick();
                 self.cleanup();
                 next_tick += Duration::from_millis(tick_period);

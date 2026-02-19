@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use opus2::{Application, Channels, Decoder, Encoder};
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::io;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
@@ -234,12 +234,42 @@ impl ClientState {
             buffer_size: cpal::BufferSize::Default,
         };
 
+        let gate_envelope = Arc::new(Mutex::new(0.0f32));
+        let gate_gain = Arc::new(Mutex::new(0.0f32));
+
+        let env_clone = Arc::clone(&gate_envelope);
+        let gain_clone = Arc::clone(&gate_gain);
+
         let input_clone = Arc::clone(&input_buffer);
         let input_stream = input_device
             .build_input_stream(
                 &config,
                 move |data: &[f32], _| {
                     let mut buffer = input_clone.lock().unwrap();
+                    let mut env = env_clone.lock().unwrap();
+                    let mut gain = gain_clone.lock().unwrap();
+
+                    const THRESHOLD: f32 = 0.03; // sensitivity
+                    const ATTACK: f32 = 0.2; // how fast it opens
+                    const RELEASE: f32 = 0.02; // how fast it closes
+                    const GAIN_ATTACK: f32 = 0.1;
+
+                    let mut sum = 0.0;
+                    for s in data {
+                        sum += s * s;
+                    }
+                    let rms = (sum / data.len() as f32).sqrt();
+
+                    if rms > *env {
+                        *env = ATTACK * rms + (1.0 - ATTACK) * *env;
+                    } else {
+                        *env = RELEASE * rms + (1.0 - RELEASE) * *env;
+                    }
+
+                    let target_gain = if *env > THRESHOLD { 1.0 } else { 0.0 };
+
+                    *gain = *gain + (target_gain - *gain) * GAIN_ATTACK;
+
                     if channels == 1 {
                         for sample in data {
                             if buffer.len() >= BUFFER_CAPACITY * 2 {
@@ -247,14 +277,16 @@ impl ClientState {
                                 buffer.pop_front();
                             }
 
-                            if !muted.load(Ordering::Relaxed) {
-                                let processed = (sample * 0.8).tanh();
-                                buffer.push_back(processed);
-                                buffer.push_back(processed);
+                            let processed = (sample * 0.8).tanh();
+
+                            let final_sample = if !muted.load(Ordering::Relaxed) {
+                                processed * *gain
                             } else {
-                                buffer.push_back(0.0);
-                                buffer.push_back(0.0);
-                            }
+                                0.0
+                            };
+
+                            buffer.push_back(final_sample);
+                            buffer.push_back(final_sample);
                         }
                     } else if channels == 2 {
                         for sample in data {
@@ -262,22 +294,22 @@ impl ClientState {
                                 buffer.pop_front();
                             }
 
-                            if !muted.load(Ordering::Relaxed) {
-                                let processed = (sample * 0.8).tanh();
-                                buffer.push_back(processed);
+                            let processed = (sample * 0.8).tanh();
+
+                            let final_sample = if !muted.load(Ordering::Relaxed) {
+                                processed * *gain
                             } else {
-                                buffer.push_back(0.0);
-                            }
+                                0.0
+                            };
+
+                            buffer.push_back(final_sample);
                         }
                     }
 
-                    let sum_sq: f32 = buffer.iter().map(|s| s * s).sum();
-                    let rms = (sum_sq / buffer.len() as f32).sqrt();
-
-                    if rms < 0.07 {
-                        talking.store(false, Ordering::Relaxed);
-                    } else {
+                    if *env > THRESHOLD {
                         talking.store(true, Ordering::Relaxed);
+                    } else {
+                        talking.store(false, Ordering::Relaxed);
                     }
                 },
                 |err| eprintln!("input stream error: {err:?}"),
@@ -341,13 +373,21 @@ impl ClientState {
     ) {
         let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
         let mut decoder = Decoder::new(48000, Channels::Stereo).unwrap();
+
+        encoder.set_inband_fec(true).unwrap();
         encoder.set_bitrate(opus2::Bitrate::Bits(96000)).unwrap();
+        encoder.set_vbr(true).unwrap();
+        encoder.set_packet_loss_perc(10).unwrap();
 
         let mut recv_buf = [0u8; 2048];
         let mut frame_buf = vec![0.0f32; TARGET_FRAME_SIZE * 2];
 
         let mut test = Instant::now();
         let mut ping_reply = Instant::now();
+
+        let mut jitter_buffer: BTreeMap<u32, Vec<u8>> = BTreeMap::new();
+        let mut expected_tick: Option<u32> = None;
+        const MAX_JITTER_FRAMES: usize = 50;
 
         loop {
             if !connected.load(Ordering::Relaxed) {
@@ -393,18 +433,28 @@ impl ClientState {
             match socket.recv_from(&mut recv_buf) {
                 Ok((size, _)) if size > 1 => match Cpt::try_from(recv_buf[0]) {
                     Ok(Cpt::Audio) => {
-                        let mut pcm = vec![0.0f32; TARGET_FRAME_SIZE * 2];
-                        if let Ok(decoded) =
-                            decoder.decode_float(&recv_buf[1..size], &mut pcm, false)
-                            && decoded > 0
-                        {
-                            let mut buffer = output.lock().unwrap();
-                            for s in &pcm[..(decoded * 2)] {
-                                if buffer.len() >= BUFFER_CAPACITY * 2 {
-                                    buffer.pop_front();
-                                }
-                                buffer.push_back(*s);
-                            }
+                        if size < 5 {
+                            continue;
+                        }
+
+                        let tick = u32::from_be_bytes([
+                            recv_buf[1],
+                            recv_buf[2],
+                            recv_buf[3],
+                            recv_buf[4],
+                        ]);
+
+                        let opus = recv_buf[5..size].to_vec();
+
+                        jitter_buffer.insert(tick, opus);
+
+                        if expected_tick.is_none() {
+                            expected_tick = Some(tick);
+                        }
+
+                        // bounded
+                        if jitter_buffer.len() > MAX_JITTER_FRAMES {
+                            jitter_buffer.pop_first();
                         }
                     }
                     Ok(Cpt::List) => {
@@ -502,6 +552,27 @@ impl ClientState {
                 }
                 Err(_) => break,
             }
+
+            while let Some((&tick, _)) = jitter_buffer.iter().next() {
+                let opus = jitter_buffer.remove(&tick).unwrap_or_default();
+                let mut pcm = vec![0.0f32; TARGET_FRAME_SIZE * 2];
+
+                let _ = if opus.is_empty() {
+                    decoder.decode_float(&[], &mut pcm, false)
+                } else {
+                    decoder.decode_float(&opus, &mut pcm, false)
+                };
+
+                // push samples to output buffer
+                let mut buffer = output.lock().unwrap();
+                for s in &pcm[..(TARGET_FRAME_SIZE * 2)] {
+                    if buffer.len() >= BUFFER_CAPACITY * 2 {
+                        buffer.pop_front();
+                    }
+                    buffer.push_back(*s);
+                }
+            }
+
             thread::sleep(Duration::from_micros(100));
         }
     }
