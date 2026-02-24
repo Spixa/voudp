@@ -9,9 +9,11 @@ plugin = {
 -- configurations
 local server_name = "Another VoUDP Server"
 local welcome_msg = "Welcome to %s!\nServer time is %s"
+local only_general = true
 
 function on_join(ctx) 
-    if ctx:get_channel_id() ~= "1" then
+    if only_general and ctx:get_channel_id() ~= "1" then
+        Core.warn("Prevented " .. ctx:get_addr() .. " from joining because you can only join the default channel as per the config")
         ctx:cancel() -- only allow joining general
     end
 

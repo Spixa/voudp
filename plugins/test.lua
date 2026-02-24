@@ -23,11 +23,12 @@ function on_message(ctx)
     local lower_message = message:lower()
 
     for _, word in ipairs(bad_words) do
-        local pattern = "%f[%a]" .. word .. "%f[%A]" -- this prevents things like grass being filtered if 'ass' is a swearword or so i was told
+        local pattern = "%f[%a]" .. word -- this prevents things like grass being filtered if 'ass' is a swearword or so i was told
         if lower_message:find(pattern) then
             swear_count[user] = (swear_count[user] or 0) + 1
 
             ctx:reply("Your message contains inappropriate language and was blocked. (" .. swear_count[user] .. "/" .. max_swears .. ")")
+            Core.info("Blocked " .. user .. "'s message");
             ctx:cancel()
 
             if swear_count[user] >= max_swears then

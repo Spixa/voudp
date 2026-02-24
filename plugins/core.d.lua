@@ -14,6 +14,18 @@ function Core.starts_with(s, prefix) return false end
 ---@return string
 function Core.system_time() return "" end
 
+--- Print into info channel
+---@param message string
+function Core.info(message) end
+
+--- Print into warn channel
+---@param message string
+function Core.warn(message) end
+
+--- Print into error channel
+---@param message string
+function Core.error(message) end
+
 --- @type string  Loopback ip address
 Core.LOOPBACK = ""
 

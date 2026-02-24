@@ -9,7 +9,7 @@ use std::{
 };
 
 use chrono::Local;
-use log::{error, info};
+use log::{error, info, warn};
 use mlua::{Lua, RegistryKey, UserData, UserDataMethods};
 
 use crate::protocol;
@@ -160,7 +160,6 @@ impl Plugin {
             core.set("LOOPBACK", "127.0.0.1")?;
             core.set("PROTOCOL_VERSION", protocol::VERSION)?;
 
-            globals.set("Core", core)?;
             // --- metadata ---
             let plugin_table: mlua::Table = globals.get("plugin")?;
 
@@ -170,6 +169,35 @@ impl Plugin {
                 author: plugin_table.get("author").ok(),
                 description: plugin_table.get("description").ok(),
             };
+
+            let name = metadata.name.clone();
+            core.set(
+                "info",
+                lua.create_function(move |_, msg: String| {
+                    info!("{}: {msg}", name); 
+                    Ok(())
+                })?,
+            )?;
+
+            let name = metadata.name.clone();
+            core.set(
+                "warn",
+                lua.create_function(move |_, msg: String| {
+                    warn!("{}: {msg}", name); 
+                    Ok(())
+                })?,
+            )?;
+
+            let name = metadata.name.clone();
+            core.set(
+                "error",
+                lua.create_function(move |_, msg: String| {
+                    error!("{}: {msg}", name); 
+                    Ok(())
+                })?,
+            )?;
+
+            globals.set("Core", core)?;
 
             // --- callbacks ---
             let on_join = globals

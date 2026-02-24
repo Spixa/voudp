@@ -1001,7 +1001,7 @@ impl eframe::App for GuiClientApp {
                             let response = ui.add_sized([available_width, 24.0], text_edit);
 
                             ui.memory_mut(|mem| {
-                                mem.data.insert_temp(response.id, response.clone())
+                                mem.data.insert_temp(input_id, response.clone())
                             });
 
                             if self.show_command_suggestions && !self.command_list.is_empty() {
@@ -1378,7 +1378,7 @@ impl GuiClientApp {
         let visible_count = filtered_commands.len().min(max_visible);
         let suggestion_height = (visible_count as f32 * 28.0).min(200.0);
 
-        let popup_pos = egui::pos2(input_rect.min.x, input_rect.min.y - suggestion_height - 5.0);
+        let popup_pos = egui::pos2(input_rect.min.x, input_rect.min.y - suggestion_height);
 
         let popup_id = egui::Id::new("command_suggestions_popup");
 
