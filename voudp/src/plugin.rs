@@ -174,7 +174,7 @@ impl Plugin {
             core.set(
                 "info",
                 lua.create_function(move |_, msg: String| {
-                    info!("{}: {msg}", name); 
+                    info!("{}: {msg}", name);
                     Ok(())
                 })?,
             )?;
@@ -183,7 +183,7 @@ impl Plugin {
             core.set(
                 "warn",
                 lua.create_function(move |_, msg: String| {
-                    warn!("{}: {msg}", name); 
+                    warn!("{}: {msg}", name);
                     Ok(())
                 })?,
             )?;
@@ -192,7 +192,7 @@ impl Plugin {
             core.set(
                 "error",
                 lua.create_function(move |_, msg: String| {
-                    error!("{}: {msg}", name); 
+                    error!("{}: {msg}", name);
                     Ok(())
                 })?,
             )?;

@@ -64,8 +64,14 @@ impl MusicClientState {
     pub fn run(&mut self, path: String) -> Result<()> {
         if self.first {
             let mut join_packet = ClientPacketType::Join.to_bytes();
-            join_packet.extend_from_slice(&self.channel_id.to_be_bytes());
+            join_packet.extend_from_slice(&(1u32).to_be_bytes());
             self.socket.send(&join_packet)?;
+
+            if self.channel_id != 1 {
+                let mut join_packet = ClientPacketType::Join.to_bytes();
+                join_packet.extend_from_slice(&self.channel_id.to_be_bytes());
+                self.socket.send(&join_packet)?;
+            }
         }
 
         self.first = false;

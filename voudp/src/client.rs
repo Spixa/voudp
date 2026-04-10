@@ -14,7 +14,7 @@ use crate::protocol::{self, ClientPacketType, FromPacket};
 use crate::socket::{self, SecureUdpSocket};
 use crate::util::{
     self, BroadcastPacket, ChannelInfo, ChatPacket, CommandListPacket, CommandResponsePacket,
-    CommandResult, FlowPacket, GlobalListPacket, ServerCommand,
+    CommandResult, FlowPacket, ForceAudio, GlobalListPacket, ServerCommand,
 };
 
 const TARGET_FRAME_SIZE: usize = 960; // 20ms at 48kHz
@@ -50,6 +50,7 @@ pub struct ClientState {
     pub state: Arc<Mutex<State>>,
     pub cmd_list: SafeCommandList,
     pub devices: Arc<Mutex<AudioDevices>>,
+    pub glitter: Arc<AtomicBool>,
 }
 
 type OwnedMessage = (Message, DateTime<Local>);
@@ -97,6 +98,7 @@ impl ClientState {
             state: Arc::new(Mutex::new(State::Fine)),
             cmd_list: Arc::new(Mutex::new(vec![])),
             devices: Arc::new(Mutex::new(AudioDevices::default())),
+            glitter: Arc::new(AtomicBool::new(false)),
         })
     }
 
@@ -122,6 +124,7 @@ impl ClientState {
         let (tx, rx) = mpsc::channel::<OwnedMessage>();
         let ping = self.ping.clone();
         let devices = self.devices.clone();
+        let glitter = self.glitter.clone();
 
         self.rx = Some(rx);
         let id = { self.channel_id.lock().unwrap() };
@@ -130,7 +133,7 @@ impl ClientState {
                 self.join(*id)?;
                 Self::start_audio(
                     socket, muted, deafened, connected, state, list, cmd_list, tx, mode, talking,
-                    ping, devices,
+                    ping, devices, glitter,
                 )?;
             }
             Mode::Gui => {
@@ -146,7 +149,7 @@ impl ClientState {
                     }
                     if let Err(e) = Self::start_audio(
                         socket, muted, deafened, connected, state, list, cmd_list, tx, mode,
-                        talking, ping, devices,
+                        talking, ping, devices, glitter,
                     ) {
                         eprintln!("audio thread error: {e:?}");
                     }
@@ -171,6 +174,7 @@ impl ClientState {
         talking: Arc<AtomicBool>,
         ping: Arc<AtomicU16>,
         devices: Arc<Mutex<AudioDevices>>,
+        glitter: Arc<AtomicBool>,
     ) -> Result<()> {
         let muted_clone = muted.clone();
         let deafened_clone = deafened.clone();
@@ -205,6 +209,7 @@ impl ClientState {
                     cmd_list,
                     muted_clone,
                     ping,
+                    glitter,
                 )
             });
         }
@@ -370,6 +375,7 @@ impl ClientState {
         cmd_list: SafeCommandList,
         muted: Arc<AtomicBool>,
         ping: Arc<AtomicU16>,
+        glitter: Arc<AtomicBool>,
     ) {
         let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
         let mut decoder = Decoder::new(48000, Channels::Stereo).unwrap();
@@ -536,6 +542,21 @@ impl ClientState {
                         let _ = tx.send((Message::Kick(reason.clone()), Local::now()));
                     }
                     Ok(Cpt::Join) | Ok(Cpt::Mask) | Ok(Cpt::Ctrl) | Ok(Cpt::RegisterConsole) => {}
+                    Ok(Cpt::ForceAudio) => {
+                        if let Ok(action) = ForceAudio::deserialize(&recv_buf[1..size]) {
+                            match action.force_type {
+                                util::ForceAudioType::ForceMute => {
+                                    muted.store(true, Ordering::Relaxed);
+                                }
+                                util::ForceAudioType::ForceDeafen => {
+                                    unimplemented!()
+                                }
+                            }
+                        }
+                    }
+                    Ok(Cpt::Vivian) => {
+                        glitter.store(true, Ordering::Relaxed);
+                    }
                     Err(_) => {}
                 },
                 Ok((_, _)) => {}
@@ -660,7 +681,10 @@ impl ClientState {
                 }
                 "h" | "help" => {
                     println!("possible commands");
-                    let content = String::from_utf8(include_bytes!("help.txt").to_vec())?;
+                    let content = String::from_utf8(
+                        "m/mute: mute microphone\ns/send: send message (requires nick)\nd/deaf: deafen speaker\nq/quit: quit server\nh/help: get this page\nn/nick: set nick/mask\nl/list: get list"
+                            .into(),
+                    )?;
                     for line in content.lines() {
                         println!("\t{}", line);
                     }

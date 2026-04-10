@@ -99,25 +99,6 @@ impl CommandSystem {
 
         self.register_command(
             ServerCommand {
-                name: "/deafen".to_string(),
-                description: "Toggle your speaker deafen".to_string(),
-                usage: "/deafen".to_string(),
-                category: CommandCategory::Audio,
-                aliases: vec![],
-                requires_auth: false,
-                admin_only: false,
-            },
-            |_, _| {
-                // if let Some(_) = chans.get(&ctx.channel_id) {
-                //     // TODO: add a ServerState::set_remote_deafen() and set_remote_mute() function and use it here
-                // }
-
-                CommandResult::Silent
-            },
-        );
-
-        self.register_command(
-            ServerCommand {
                 name: "/whoami".to_string(),
                 description: "Show your current nickname and channel".to_string(),
                 usage: "/whoami".to_string(),

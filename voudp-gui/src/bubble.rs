@@ -1,5 +1,5 @@
 use chrono::Local;
-use egui::Color32;
+use egui::{Color32, Pos2, Vec2};
 
 pub fn parse_chat_message(msg: &str) -> Option<(String, String, String)> {
     if !msg.starts_with("[#") {
@@ -91,7 +91,6 @@ pub fn connection_activity_wifi(ui: &mut egui::Ui, size: f32, color: egui::Color
 
     let first_arc_radius = dot_radius + arc_gap + arc_thickness * 0.5;
 
-    // Push upward to fill square nicely
     let vertical_shift = size * 0.12;
     let origin = center + egui::vec2(0.0, vertical_shift);
 
@@ -117,6 +116,36 @@ pub fn connection_activity_wifi(ui: &mut egui::Ui, size: f32, color: egui::Color
 
     // ===== BASE DOT (ALWAYS VISIBLE) =====
     painter.circle_filled(origin, dot_radius, color);
+}
+
+pub struct Particle {
+    pub pos: Pos2,
+    pub vel: Vec2,
+    pub color: Color32,
+    pub rotation: f32,
+    pub angular_vel: f32,
+}
+
+pub fn update_confetti(ui: &mut egui::Ui, particles: &mut Vec<Particle>) {
+    let dt = ui.input(|i| i.stable_dt);
+    let painter = ui.painter();
+
+    particles.retain_mut(|p| {
+        p.vel.y += 500.0 * dt; // gravity
+        p.pos += p.vel * dt;
+        p.rotation += p.angular_vel * dt;
+
+        // draw the confetti (a small rotated rect)
+        let rect = egui::Rect::from_center_size(p.pos, egui::vec2(5.0, 5.0));
+        let mesh = egui::Shape::rect_filled(rect, 1.0, p.color); // Simplified
+        painter.add(mesh);
+
+        // keep particle if it's still on screen
+        p.pos.y < ui.ctx().screen_rect().height()
+    });
+
+    // request a repaint to keep the animation smooth
+    ui.ctx().request_repaint();
 }
 
 fn _name_color(_: &str) -> egui::Color32 {

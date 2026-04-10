@@ -5,13 +5,14 @@ use chrono::{DateTime, Local};
 use core::f32;
 use eframe::{NativeOptions, egui};
 use egui::{Color32, Id, RichText, Stroke};
+use rand::Rng;
 
 use std::{
     fs::File,
     io::{self, Read, Write},
     sync::{Arc, Mutex, RwLock, atomic::Ordering, mpsc::TryRecvError},
     thread::{self, JoinHandle},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use voudp::{
@@ -65,6 +66,9 @@ struct GuiClientApp {
     selected_suggestion: usize,
     filter_text: String,
     ping: u16,
+    confetti: Vec<crate::bubble::Particle>,
+    spawn_confetti: bool,
+    confetti_start: Instant,
 }
 
 #[derive(Default, PartialEq, Eq)]
@@ -145,6 +149,9 @@ impl Default for GuiClientApp {
             selected_suggestion: 0,
             filter_text: String::new(),
             ping: u16::MAX,
+            confetti: vec![],
+            spawn_confetti: false,
+            confetti_start: Instant::now(),
         }
     }
 }
@@ -790,6 +797,10 @@ impl eframe::App for GuiClientApp {
                 });
 
             egui::CentralPanel::default().show(ctx, |ui| {
+                if !self.confetti.is_empty() {
+                    crate::bubble::update_confetti(ui, &mut self.confetti);
+                }
+
                 ui.horizontal(|ui| {
                     let button_height = 32.0;
                     let button_width = 100.0; // fixed width for uniformity
@@ -1000,9 +1011,7 @@ impl eframe::App for GuiClientApp {
 
                             let response = ui.add_sized([available_width, 24.0], text_edit);
 
-                            ui.memory_mut(|mem| {
-                                mem.data.insert_temp(input_id, response.clone())
-                            });
+                            ui.memory_mut(|mem| mem.data.insert_temp(input_id, response.clone()));
 
                             if self.show_command_suggestions && !self.command_list.is_empty() {
                                 let handled = self.handle_command_nav(ui.ctx(), response.id);
@@ -1072,6 +1081,21 @@ impl eframe::App for GuiClientApp {
                 ctx.request_repaint_after(std::time::Duration::from_millis(16));
                 return;
             };
+
+            if client.glitter.load(Ordering::Relaxed) {
+                client.glitter.store(false, Ordering::Relaxed);
+                self.confetti_start = Instant::now();
+                self.spawn_confetti = true;
+            }
+
+            if self.spawn_confetti
+                && Instant::now().duration_since(self.confetti_start) <= Duration::from_secs(15)
+            {
+                self.spawn_confetti(ctx);
+            } else {
+                self.spawn_confetti = false;
+            }
+
             match rx.try_recv() {
                 Ok((msg, time)) => match msg {
                     Message::JoinMessage(name) => {
@@ -1163,6 +1187,28 @@ impl eframe::App for GuiClientApp {
 }
 
 impl GuiClientApp {
+    fn spawn_confetti(&mut self, ctx: &egui::Context) {
+        use crate::bubble::Particle;
+        let screen_rect = ctx.screen_rect();
+
+        let mut rng = rand::rng();
+        for _ in 0..4 {
+            self.confetti.push(Particle {
+                pos: egui::pos2(
+                    rng.random_range(screen_rect.min.x..screen_rect.max.x),
+                    screen_rect.min.y - 10.0,
+                ),
+                vel: egui::vec2(
+                    rng.random_range(-50.0..50.0),
+                    rng.random_range(100.0..300.0),
+                ),
+                color: egui::Color32::from_rgb(rng.random(), rng.random(), rng.random()),
+                rotation: rng.random_range(0.0..std::f32::consts::TAU),
+                angular_vel: rng.random_range(-5.0..5.0),
+            });
+        }
+    }
+
     fn disconnect(&mut self) {
         if let Some(client) = &self.client {
             client.lock().unwrap().disconnect();

@@ -1,10 +1,11 @@
-## Things related to audio
-* Add real jitter buffering
-* Add packet reordering
-* Add packet loss concealment (PLC)
-* Implement in-band FEC
-* Do time-aligned mixing
-* Add deterministic clock
+## Add more event handling methods to lua plugin
+1. `on_load(ctx)`: Triggered when plugin first starts, useful for populating tables that are context aware
+2. `on_tick(ctx)`: Triggered when server ticks once, useful for things like checking AFK status and things like that (implementing a timer with a tick timer)
+3. and more
+
+## Inject more methods to the context tables
+Some useful functions could be injected like `mute(mask: String)` or `deafen(mask: String)` or `move(mask: String, to: u32)`
+
 
 ## Other high priority features after audio:
 * Implement the color command for selecting own color in chat

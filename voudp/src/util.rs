@@ -1,10 +1,9 @@
-use std::io;
-use std::io::Write;
-use std::net::SocketAddr;
-
 use crate::protocol::{
     ClientPacketType, CommandResultPacketType, ControlRequest, FromPacket, IntoPacket, PacketError,
 };
+use std::io;
+use std::io::Write;
+use std::net::SocketAddr;
 
 #[derive(Debug, Clone)]
 pub struct ChannelInfo {
@@ -73,6 +72,30 @@ pub fn is_whitespace_only(s: &str) -> bool {
             '\u{FEFF}' // BYTE ORDER MARK
             )
     })
+}
+
+pub enum ForceAudioType {
+    ForceMute,
+    ForceDeafen,
+}
+
+pub struct ForceAudio {
+    pub force_type: ForceAudioType,
+}
+
+impl IntoPacket for ForceAudio {
+    fn serialize(&self) -> Vec<u8> {
+        let mut packet = vec![ClientPacketType::ForceAudio as u8];
+
+        type Fat = ForceAudioType;
+        let flag = match self.force_type {
+            Fat::ForceMute => 0x00,
+            Fat::ForceDeafen => 0x01,
+        };
+
+        packet.push(flag);
+        packet
+    }
 }
 
 impl IntoPacket for CommandResult {
@@ -149,6 +172,12 @@ pub enum FlowPacket {
 #[derive(Debug, Clone)]
 pub struct ControlPacket {
     pub request: ControlRequest,
+}
+
+#[derive(Debug, Clone)]
+pub struct JoinPacket {
+    pub channel_id: u32,
+    pub protocol: u32,
 }
 
 impl FromPacket for GlobalListPacket {
@@ -520,5 +549,21 @@ impl FromPacket for ControlPacket {
         };
 
         Ok(ControlPacket { request })
+    }
+}
+
+impl FromPacket for ForceAudio {
+    fn deserialize(from: &[u8]) -> Result<Self, PacketError> {
+        if from.len() < 2 {
+            return Err(PacketError::TooShort(1, 0));
+        }
+
+        let force_type = match from[0] {
+            0x00 => Ok(ForceAudioType::ForceDeafen),
+            0x01 => Ok(ForceAudioType::ForceMute),
+            _ => Err(PacketError::InvalidData("Expected 0x00 or 0x01".into())),
+        }?;
+
+        Ok(ForceAudio { force_type })
     }
 }

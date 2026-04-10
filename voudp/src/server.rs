@@ -381,6 +381,25 @@ impl ServerState {
             },
         );
 
+        let socket_clone = socket.clone();
+        command_system.register_command(
+            ServerCommand {
+                name: "/vivian".into(),
+                description: "Dedicated to ladyViviaen".into(),
+                usage: "Of no use".into(),
+                category: CommandCategory::Fun,
+                aliases: vec![],
+                requires_auth: true,
+                admin_only: false,
+            },
+            move |ctx, _| {
+                info!("Vivian request to {}", ctx.sender_addr);
+                let packet = vec![ClientPacketType::Vivian as u8, 0];
+                let _ = socket_clone.send_reliable(packet, ctx.sender_addr);
+                CommandResult::Success("HAPPY BIRTHDAY VIVIAN!".into())
+            },
+        );
+
         let socket = Arc::new(socket); // wrap in Arc
 
         let mut plugin_manager = PluginManager::new(plugin_tx.clone());

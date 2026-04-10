@@ -15,6 +15,8 @@ function on_join(ctx)
     if only_general and ctx:get_channel_id() ~= "1" then
         Core.warn("Prevented " .. ctx:get_addr() .. " from joining because you can only join the default channel as per the config")
         ctx:cancel() -- only allow joining general
+    else
+        Core.info("Sent default welcome message to " .. ctx:get_addr())
     end
 
     ctx:reply(string.format(welcome_msg, server_name, Core.system_time()))

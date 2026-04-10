@@ -76,6 +76,7 @@ pub fn handle_command(
                 ))
             }
         }
+        "a" => ConsoleCommandResult::Reply("yo".into()),
         "del" => {
             if parts.len() < 2 {
                 ConsoleCommandResult::Reply("usage: del <channel_id|channel_name>".into())
