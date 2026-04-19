@@ -36,7 +36,8 @@ pub enum ClientPacketType {
     Broadcast = 0x13,
     ForceAudio = 0x14,
     Vivian = 0x15,
-    // 0x16-0xfe are reserved
+    MaskFailed = 0x16,
+    // 0x17-0xfe are reserved
     RegisterConsole = 0xff,
 }
 
@@ -55,7 +56,8 @@ impl ClientPacketType {
                 | ClientPacketType::Kick
                 | ClientPacketType::Broadcast
                 | ClientPacketType::ForceAudio
-                | ClientPacketType::Vivian,
+                | ClientPacketType::Vivian
+                | ClientPacketType::MaskFailed,
         )
     }
 }
@@ -108,6 +110,7 @@ impl TryFrom<u8> for ClientPacketType {
             0x13 => Ok(Self::Broadcast),
             0x14 => Ok(Self::ForceAudio),
             0x15 => Ok(Self::Vivian),
+            0x16 => Ok(Self::MaskFailed),
             0xff => Ok(Self::RegisterConsole),
             _ => Err(value),
         }

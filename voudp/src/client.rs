@@ -63,6 +63,7 @@ pub enum Message {
     Renick(String, String),
     Broadcast(String, String),
     Kick(String),
+    MaskFailed,
 }
 
 pub struct GlobalListState {
@@ -556,6 +557,10 @@ impl ClientState {
                     }
                     Ok(Cpt::Vivian) => {
                         glitter.store(true, Ordering::Relaxed);
+                    }
+                    Ok(Cpt::MaskFailed) => {
+                        println!("ayo");
+                        let _ = tx.send((Message::MaskFailed, Local::now()));
                     }
                     Err(_) => {}
                 },

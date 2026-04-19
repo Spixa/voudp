@@ -26,6 +26,7 @@ use crate::{
         self, ClientPacketType, ConsolePacketType, ControlRequest, FromPacket, IntoPacket, PASSWORD,
     },
     socket::{self, SecureUdpSocket},
+    timeline::ChannelTimeline,
     util::{
         self, BroadcastPacket, CommandCategory, CommandContext, CommandResult, ControlPacket,
         ServerCommand,
@@ -147,12 +148,14 @@ pub struct Channel {
     pub buffers: HashMap<SocketAddr, Vec<f32>>,
     pub filter_states: HashMap<SocketAddr, (f32, f32)>,
     pub server_config: ServerConfig,
+    timeline: ChannelTimeline,
 }
 
 impl Channel {
     pub fn new(server_config: ServerConfig, name: String, _id: u32) -> Self {
         info!(
-            "Created new channel #{name} with internal id {_id} ({:1}kHz stereo with text chatting)",
+            "Created new v{} channel #{name} with internal id {_id} ({:1}kHz stereo + text + command)",
+            protocol::VERSION,
             server_config.sample_rate as f32 / 1000.0
         );
         Self {
@@ -162,6 +165,7 @@ impl Channel {
             buffers: HashMap::new(),
             filter_states: HashMap::new(),
             server_config,
+            timeline: ChannelTimeline::default(),
         }
     }
 
@@ -597,7 +601,11 @@ impl ServerState {
         let Some(remote) = self.remotes.get(&addr) else {
             return;
         };
+
         let mut remote = remote.lock().unwrap();
+        if remote.mask.is_none() {
+            return;
+        }
 
         remote.last_active = Instant::now();
 
@@ -666,7 +674,28 @@ impl ServerState {
                 return;
             }
 
+            if self
+                .remotes
+                .values()
+                .any(|r| r.lock().unwrap().mask.as_deref() == Some(&new_mask))
+            {
+                warn!("Mask '{}' already in use, skipping request...", new_mask);
+                Self::dm(&self.socket, addr, "Mask already in use".into());
+
+                let mask_fail_packet = vec![ClientPacketType::MaskFailed as u8, 0];
+                let _ = self.socket.send_reliable(mask_fail_packet, addr);
+                return;
+            }
+
             remote.lock().unwrap().mask = Some(new_mask.clone());
+            let channel = {
+                let id = remote.lock().unwrap().channel_id;
+                self.channels.get_mut(&id)
+            };
+
+            if let Some(channel) = channel {
+                channel.timeline.ensure_user(&new_mask);
+            }
 
             (old_mask, new_mask, channel_id)
         };

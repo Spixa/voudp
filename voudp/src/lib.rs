@@ -7,4 +7,5 @@ pub mod plugin;
 pub mod protocol;
 pub mod server;
 pub mod socket;
+pub mod timeline;
 pub mod util;

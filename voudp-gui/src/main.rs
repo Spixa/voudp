@@ -315,7 +315,7 @@ impl eframe::App for GuiClientApp {
                         .inner_margin(egui::Margin::symmetric(20.0, 20.0))
                         .show(ui, |ui| {
                             ui.vertical_centered(|ui| {
-                                ui.heading(RichText::new("VoUDP GUI Client").size(24.0).strong());
+                                ui.heading(RichText::new("VoUDP").size(24.0).strong());
                                 ui.add_space(15.0);
 
                                 // ----- Server Address -----
@@ -1176,6 +1176,10 @@ impl eframe::App for GuiClientApp {
                         self.error.message = msg;
                         self.error.show = ShowMode::ShowError;
                     }
+                    Message::MaskFailed => {
+                        self.nicked = false;
+                        self.nick = String::new();
+                    }
                 },
                 Err(TryRecvError::Empty) => thread::yield_now(),
                 Err(TryRecvError::Disconnected) => {}
@@ -1415,24 +1419,24 @@ impl GuiClientApp {
         }
 
         let input_response = ui.memory(|mem| mem.data.get_temp::<egui::Response>(input_id));
-        let input_rect = input_response.map(|r| r.rect).unwrap_or_else(|| {
-            // fallback: use a default position
-            ui.min_rect()
-        });
+        let input_rect = input_response
+            .map(|r| r.rect)
+            .unwrap_or_else(|| ui.min_rect());
 
         let max_visible = 8;
         let visible_count = filtered_commands.len().min(max_visible);
         let suggestion_height = (visible_count as f32 * 28.0).min(200.0);
 
-        let popup_pos = egui::pos2(input_rect.min.x, input_rect.min.y - suggestion_height);
-
         let popup_id = egui::Id::new("command_suggestions_popup");
 
         let mut action_to_take: Option<CommandAction> = None;
 
+        // Anchor the popup's bottom-left corner above the input's top-left corner.
+        // Increase the negative Y offset to raise the popup higher.
         let area = egui::Area::new(popup_id)
             .order(egui::Order::Tooltip)
-            .fixed_pos(popup_pos);
+            .anchor(egui::Align2::LEFT_BOTTOM, egui::vec2(10.0, -45.0))
+            .fixed_pos(input_rect.left_top());
 
         area.show(ui.ctx(), |ui| {
             egui::Frame::popup(ui.style())
@@ -1534,7 +1538,6 @@ impl GuiClientApp {
             None => {}
         }
     }
-
     fn tab_complete(&mut self) {
         let filtered_commands = self.get_filtered_commands();
 

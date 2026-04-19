@@ -8,7 +8,7 @@ plugin = {
 
 -- configurations
 local server_name = "Another VoUDP Server"
-local welcome_msg = "Welcome to %s!\nServer time is %s"
+local welcome_msg = "Welcome to %s!\nServer time is %s\nMask yourself to be able to talk!"
 local only_general = true
 
 function on_join(ctx) 
@@ -22,6 +22,6 @@ function on_join(ctx)
     ctx:reply(string.format(welcome_msg, server_name, Core.system_time()))
 
     if Core.starts_with(ctx:get_addr(), Core.LOOPBACK) then
-        ctx:reply("Connected from loopback")
+        Core.info(ctx:get_addr() .. " connected from loopback")
     end
 end
