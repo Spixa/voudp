@@ -96,6 +96,7 @@ pub struct Remote {
     mask: Option<String>,
     jitter_buffer: VecDeque<Vec<f32>>,
     pub(crate) status: RemoteStatus,
+    pub(crate) volume_settings: HashMap<String, f32>,
 }
 
 impl Remote {
@@ -121,7 +122,17 @@ impl Remote {
             mask: None,
             jitter_buffer: VecDeque::with_capacity(JITTER_BUFFER_LEN),
             status: Default::default(),
+            volume_settings: HashMap::new(),
         })
+    }
+
+    pub fn set_user_volume(&mut self, speaker_mask: &str, volume: f32) {
+        self.volume_settings
+            .insert(speaker_mask.to_string(), volume.clamp(0.0, 2.0));
+    }
+
+    pub fn get_user_volume(&self, speaker_mask: &str) -> f32 {
+        *self.volume_settings.get(speaker_mask).unwrap_or(&1.0)
     }
 }
 
@@ -195,7 +206,14 @@ impl Channel {
             let state = self.filter_states.entry(*addr).or_insert((0.0, 0.0));
             let mut processed = buf.clone();
             mixer::remove_dc_bias(&mut processed, state);
-            processed_buffers.insert(*addr, processed);
+
+            let speaker_mask = self
+                .remotes
+                .iter()
+                .find(|r| r.lock().unwrap().addr == *addr)
+                .and_then(|r| r.lock().unwrap().mask.clone());
+
+            processed_buffers.insert(*addr, (processed, speaker_mask));
         }
 
         // personalized mix which is done separately
@@ -207,10 +225,20 @@ impl Channel {
                 continue;
             }
 
+            let volume_settings = &guard.volume_settings;
+
             // collect all active talkers excluding self
             let talkers: Vec<_> = processed_buffers
                 .iter()
                 .filter(|(addr, _)| **addr != remote_addr)
+                .filter_map(|(_, (buf, speaker_mask_opt))| {
+                    let vol = speaker_mask_opt
+                        .as_deref()
+                        .and_then(|mask| volume_settings.get(mask))
+                        .copied()
+                        .unwrap_or(1.0);
+                    Some((buf, vol))
+                })
                 .collect();
 
             let active_count = talkers.len();
@@ -219,12 +247,12 @@ impl Channel {
             }
 
             // compute gain once
-            let gain = 1.0 / (active_count as f32).sqrt();
+            let base_gain = 1.0 / (active_count as f32).sqrt();
 
             let mut mix = vec![0.0f32; self.server_config.get_framesize() * 2];
-            for (_, buf) in talkers {
+            for (buf, user_volume) in talkers {
                 for (i, sample) in buf.iter().enumerate() {
-                    mix[i] += sample * gain;
+                    mix[i] += sample * base_gain * user_volume;
                 }
             }
 
@@ -327,15 +355,15 @@ impl ServerState {
             },
             move |ctx, chans| {
                 if ctx.arguments.is_empty() {
-                    return CommandResult::Error("usage: /broadcast <message>".into());
+                    return CommandResult::Error("Usage: /broadcast <message>".into());
                 }
 
                 Self::broadcast_channel(
                     socket_clone.clone(),
                     chans,
                     ctx.channel_id,
+                    "Broadcast".into(),
                     ctx.arguments.join(" "),
-                    String::new(),
                 );
 
                 CommandResult::Silent
@@ -981,14 +1009,12 @@ impl ServerState {
         let (command, _, args) = match self.command_system.parse_command(input) {
             Some((cmd, fun, args)) => (cmd, fun, args),
             None => {
-                return CommandResult::Error(
-                    "Unknown command. Type /help for available commands.".to_string(),
-                );
+                return CommandResult::Error("Unknown command".to_string());
             }
         };
 
         if command.requires_auth && sender_mask.is_none() {
-            return CommandResult::Error("You need to set a nickname first with /nick".to_string());
+            return CommandResult::Error("You need to set a nickname first".to_string());
         }
 
         if command.admin_only && !is_admin {

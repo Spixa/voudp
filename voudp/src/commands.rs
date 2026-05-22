@@ -123,6 +123,102 @@ impl CommandSystem {
             },
         );
 
+        self.register_command(
+            ServerCommand {
+                name: "/volume".to_string(),
+                description: "Adjust volume of another user for yourself".to_string(),
+                usage: "/volume <user> [0.0-2.0]".to_string(),
+                category: CommandCategory::Audio,
+                aliases: vec!["/vol".to_string(), "/gain".to_string()],
+                requires_auth: false,
+                admin_only: false,
+            },
+            move |ctx, chans| {
+                if ctx.arguments.is_empty() {
+                    return CommandResult::Error(
+                        "usage: /volume <user> [volume (0.0-2.0)]".to_string(),
+                    );
+                }
+
+                let target_user = &ctx.arguments[0];
+                let new_vol = ctx.arguments.get(1).and_then(|v| v.parse::<f32>().ok());
+
+                if let Some(channel) = chans.get(&ctx.channel_id) {
+                    if let Some(requesting_remote) = channel
+                        .remotes
+                        .iter()
+                        .find(|r| r.lock().unwrap().addr == ctx.sender_addr)
+                    {
+                        let mut remote = requesting_remote.lock().unwrap();
+
+                        if let Some(vol) = new_vol {
+                            let final_vol = vol.clamp(0.0, 2.0);
+                            remote.set_user_volume(target_user, final_vol);
+                            CommandResult::Success(format!(
+                                "volume for '{}' set to {:.2} ({:.0}%)",
+                                target_user,
+                                final_vol,
+                                final_vol * 100.0
+                            ))
+                        } else {
+                            let current = remote.get_user_volume(target_user);
+                            CommandResult::Success(format!(
+                                "volume for '{}' is currently {} ({:.0}%)",
+                                target_user,
+                                current,
+                                current * 100.0
+                            ))
+                        }
+                    } else {
+                        CommandResult::Error("You're not in a channel?".into())
+                    }
+                } else {
+                    CommandResult::Error("Channel not found".into())
+                }
+            },
+        );
+
+        self.register_command(
+            ServerCommand {
+                name: "/volumes".to_string(),
+                description: "List your volume adjustments".to_string(),
+                usage: "/volumes".to_string(),
+                category: CommandCategory::Audio,
+                aliases: vec!["/vols".to_string()],
+                requires_auth: true,
+                admin_only: false,
+            },
+            move |ctx, chans| {
+                if let Some(channel) = chans.get(&ctx.channel_id) {
+                    if let Some(remote) = channel
+                        .remotes
+                        .iter()
+                        .find(|r| r.lock().unwrap().addr == ctx.sender_addr)
+                    {
+                        let remote = remote.lock().unwrap();
+                        if remote.volume_settings.is_empty() {
+                            return CommandResult::Success("No custom volume settings".into());
+                        }
+
+                        let settings: Vec<String> = remote
+                            .volume_settings
+                            .iter()
+                            .map(|(user, vol)| format!("{}: {:.1}", user, vol))
+                            .collect();
+
+                        CommandResult::Success(format!(
+                            "Your volume settings:\n{}",
+                            settings.join("\n")
+                        ))
+                    } else {
+                        CommandResult::Error("Not found".into())
+                    }
+                } else {
+                    CommandResult::Error("Channel not found".into())
+                }
+            },
+        );
+
         //     self.register_command(ServerCommand {
         //         name: "/join".to_string(),
         //         description: "Switch to another channel".to_string(),

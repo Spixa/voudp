@@ -8,8 +8,8 @@ plugin = {
 }
 
 local bad_words = {
-    "cranker",
-    "cranka",
+    "clanker",
+    "clanka",
     "wireback",
     "tinskin"
 }

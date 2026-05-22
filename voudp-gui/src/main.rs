@@ -882,46 +882,62 @@ impl eframe::App for GuiClientApp {
                                 || *color == Color32::YELLOW
                                 || *color == Color32::LIGHT_GREEN
                                 || *color == Color32::LIGHT_RED
-                                || *color == Color32::RED;
+                                || *color == Color32::RED
+                                || *color == Color32::from_rgb(255, 128, 255);
 
                             if is_system {
-                                if let Some((src, content)) = parse_system_message(msg) {
-                                    ui.vertical_centered(|ui| {
-                                        ui.add_space(4.0);
+                                ui.vertical_centered(|ui| {
+                                    let frame = egui::Frame::default()
+                                        .fill(egui::Color32::from_gray(32)) // dark
+                                        .rounding(egui::Rounding::same(8.0))
+                                        .inner_margin(egui::Margin::symmetric(12.0, 6.0))
+                                        .outer_margin(egui::Margin::symmetric(0.0, 4.0));
 
+                                    frame.show(ui, |ui| {
                                         ui.style_mut().wrap = Some(true);
-                                        ui.label(
-                                            egui::RichText::new(src)
-                                                .color(*color)
-                                                .size(14.0)
-                                                .strong()
-                                                .monospace(),
-                                        );
+                                        ui.spacing_mut().item_spacing.y = 2.0;
 
-                                        ui.label(
-                                            egui::RichText::new(content).color(*color).size(12.0),
-                                        );
+                                        if let Some((src, content)) = parse_system_message(msg) {
+                                            ui.horizontal(|ui| {
+                                                let title_badge = egui::Frame::default()
+                                                    .fill(egui::Color32::from_gray(48))
+                                                    .rounding(egui::Rounding::same(12.0))
+                                                    .inner_margin(egui::Margin::symmetric(
+                                                        8.0, 2.0,
+                                                    ));
+
+                                                title_badge.show(ui, |ui| {
+                                                    ui.add_space(4.0);
+                                                    ui.label(
+                                                        egui::RichText::new(src)
+                                                            .color(*color)
+                                                            .size(13.0)
+                                                            .strong(),
+                                                    );
+                                                });
+                                            });
+                                            ui.add_space(4.0);
+                                            ui.label(
+                                                egui::RichText::new(content)
+                                                    .color(*color)
+                                                    .size(12.0),
+                                            );
+                                        } else {
+                                            // Fallback: single line system message
+                                            ui.label(
+                                                egui::RichText::new(msg)
+                                                    .color(*color)
+                                                    .size(12.0)
+                                                    .italics()
+                                                    .strong(),
+                                            );
+                                        }
                                         ui.style_mut().wrap = None;
-
-                                        ui.add_space(4.0);
                                     });
-                                } else {
-                                    ui.vertical_centered(|ui| {
-                                        ui.add_space(2.0);
-                                        ui.label(
-                                            egui::RichText::new(msg)
-                                                .color(*color)
-                                                .size(12.0)
-                                                .italics()
-                                                .strong(),
-                                        );
-                                        ui.add_space(2.0);
-                                    });
-                                }
+                                });
                                 continue;
                             }
 
-                            // Try to parse as chat message
                             if let Some((_, name, content)) = parse_chat_message(msg) {
                                 // Colors
                                 let (_, text_color) = if is_self {
@@ -930,17 +946,28 @@ impl eframe::App for GuiClientApp {
                                     (Color32::from_rgb(240, 240, 240), Color32::BLACK)
                                 };
 
-                                let channel_label = format!("{} ", name);
+                                let time_str = time.format("%H:%M").to_string();
+                                let full_time = time.format("%Y-%m-%d %H:%M:%S").to_string();
+
                                 if is_self {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::TOP),
                                         |ui| {
                                             ui.add_space(4.0);
-                                            ui.label(
-                                                egui::RichText::new(channel_label)
-                                                    .color(Color32::LIGHT_YELLOW)
-                                                    .size(13.0),
-                                            );
+                                            ui.horizontal(|ui| {
+                                                ui.label(
+                                                    egui::RichText::new(format!("{} ", name))
+                                                        .color(Color32::LIGHT_YELLOW)
+                                                        .size(13.0),
+                                                );
+                                                ui.add_space(5.0);
+                                                ui.label(
+                                                    egui::RichText::new(&time_str)
+                                                        .color(Color32::from_rgb(180, 180, 180))
+                                                        .size(11.0),
+                                                )
+                                                .on_hover_text(full_time);
+                                            });
                                             ui.add_space(4.0);
                                         },
                                     );
@@ -948,8 +975,16 @@ impl eframe::App for GuiClientApp {
                                     ui.horizontal(|ui| {
                                         ui.add_space(4.0);
                                         ui.label(
-                                            egui::RichText::new(channel_label)
+                                            egui::RichText::new(&time_str)
                                                 .color(Color32::from_rgb(150, 150, 150))
+                                                .size(11.0),
+                                        )
+                                        .on_hover_text(full_time);
+
+                                        ui.add_space(4.0);
+                                        ui.label(
+                                            egui::RichText::new(format!("{} ", name))
+                                                .color(Color32::WHITE)
                                                 .size(13.0),
                                         );
                                         ui.add_space(4.0);
@@ -961,38 +996,30 @@ impl eframe::App for GuiClientApp {
                                     ui.with_layout(
                                         egui::Layout::right_to_left(egui::Align::TOP),
                                         |ui| {
-                                            bubble_ui(ui, &content, time, text_color);
+                                            bubble_ui(
+                                                ui,
+                                                &content,
+                                                text_color,
+                                                Some(&name),
+                                                &mut self.input,
+                                            );
                                         },
                                     );
                                 } else {
                                     ui.horizontal(|ui| {
-                                        bubble_ui(ui, &content, time, text_color);
+                                        bubble_ui(
+                                            ui,
+                                            &content,
+                                            text_color,
+                                            Some(&name),
+                                            &mut self.input,
+                                        );
                                     });
                                 }
 
                                 ui.add_space(2.0);
                             } else {
-                                // Fallback: display raw message in bubble
-                                let text_color = if is_self {
-                                    Color32::WHITE
-                                } else {
-                                    Color32::BLACK
-                                };
-
-                                if is_self {
-                                    ui.with_layout(
-                                        egui::Layout::right_to_left(egui::Align::TOP),
-                                        |ui| {
-                                            bubble_ui(ui, msg, time, text_color);
-                                        },
-                                    );
-                                } else {
-                                    ui.horizontal(|ui| {
-                                        bubble_ui(ui, msg, time, text_color);
-                                    });
-                                }
-
-                                ui.add_space(2.0);
+                                // received invalid message
                             }
                         }
                     });
@@ -1000,30 +1027,57 @@ impl eframe::App for GuiClientApp {
                 egui::TopBottomPanel::bottom("input_panel")
                     .show_separator_line(true)
                     .show_inside(ui, |ui| {
-                        let input_id = ui.make_persistent_id("chat_input");
-
                         ui.add_space(2.0);
+
+                        // Assign a persistent ID so we can reliably check focus
+                        let input_id = ui.make_persistent_id("chat_input");
+                        let is_focused = ui.memory(|mem| mem.has_focus(input_id));
+
+                        let mut send_triggered = false;
+
+                        // --- Intercept Enter key BEFORE the TextEdit sees it ---
+                        if is_focused {
+                            let enter = ui.input(|i| i.key_pressed(egui::Key::Enter));
+                            let shift = ui.input(|i| i.modifiers.shift);
+                            if enter && !shift {
+                                send_triggered = true;
+                                // Consume the key so TextEdit doesn't add a newline
+                                ui.input_mut(|i| {
+                                    i.consume_key(egui::Modifiers::NONE, egui::Key::Enter)
+                                });
+                            }
+                        }
+
                         ui.horizontal(|ui| {
                             let available_width = ui.available_width() - 80.0;
+
+                            // --- Multiline text edit with persistent ID ---
                             let text_edit = egui::TextEdit::singleline(&mut self.input)
+                                .id(input_id) // Important: links focus check above
                                 .hint_text("type your message/command...")
-                                .text_color(Color32::from_rgb(255, 215, 0));
+                                .text_color(Color32::from_rgb(255, 215, 0))
+                                .desired_rows(2) // Set initial height; grows with content
+                                .desired_width(available_width);
+                            let mut response = None;
+                            ui.vertical(|ui| {
+                                response = Some(ui.add(text_edit));
+                            });
+                            let response = response.unwrap();
 
-                            let response = ui.add_sized([available_width, 24.0], text_edit);
-
+                            // Store response for command suggestions if needed
                             ui.memory_mut(|mem| mem.data.insert_temp(input_id, response.clone()));
 
+                            // --- Command suggestion handling (unchanged) ---
                             if self.show_command_suggestions && !self.command_list.is_empty() {
                                 let handled = self.handle_command_nav(ui.ctx(), response.id);
-
                                 if !handled {
                                     self.show_command_suggestions_ui(ui, input_id);
                                 }
                             }
 
-                            let send_button_size = [70.0, 28.0]; // slightly smaller than input
-
-                            let send_color = { Color32::from_gray(70) };
+                            // --- Send button ---
+                            let send_button_size = [70.0, 28.0];
+                            let send_color = Color32::from_gray(70);
 
                             if ui
                                 .add_sized(
@@ -1036,33 +1090,22 @@ impl eframe::App for GuiClientApp {
                                     .rounding(6.0),
                                 )
                                 .clicked()
+                                || send_triggered
+                            // Also send if we intercepted Enter
                             {
                                 if self.input.starts_with('/') {
                                     self.execute_command();
                                 } else {
                                     self.send_message();
                                 }
+                                // After sending, refocus the input field
+                                ui.memory_mut(|mem| mem.request_focus(input_id));
                             }
 
-                            // if self.error.show.ne(&ShowMode::DontShow) {
-                            //     return;
-                            // }
-
-                            if response.lost_focus()
-                                && ui.input(|i| i.key_pressed(egui::Key::Enter))
-                            {
-                                if self.input.starts_with('/') {
-                                    self.execute_command();
-                                } else {
-                                    self.send_message();
-                                }
-                                ui.memory_mut(|mem| mem.request_focus(response.id));
-                            }
-
-                            if response.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Tab))
-                            {
+                            // --- Tab completion (unchanged) ---
+                            if is_focused && ui.input(|i| i.key_pressed(egui::Key::Tab)) {
                                 self.tab_complete();
-                                ui.memory_mut(|mem| mem.request_focus(response.id));
+                                ui.memory_mut(|mem| mem.request_focus(input_id));
                             }
                         });
                     });
@@ -1319,7 +1362,9 @@ impl GuiClientApp {
         }
 
         let filter_text = self.filter_text.clone();
-        let filtered_commands: Vec<&ServerCommand> = self
+
+        // get filtered commands
+        let mut filtered_commands: Vec<&ServerCommand> = self
             .command_list
             .iter()
             .filter(|cmd| {
@@ -1336,6 +1381,18 @@ impl GuiClientApp {
                 name_match || alias_match
             })
             .collect();
+
+        // sort: exact matches first, then by length
+        filtered_commands.sort_by(|a, b| {
+            let a_exact = a.name[1..].to_lowercase() == filter_text.to_lowercase();
+            let b_exact = b.name[1..].to_lowercase() == filter_text.to_lowercase();
+
+            match (a_exact, b_exact) {
+                (true, false) => std::cmp::Ordering::Less,
+                (false, true) => std::cmp::Ordering::Greater,
+                _ => a.name.len().cmp(&b.name.len()),
+            }
+        });
 
         let filtered_count = filtered_commands.len();
         if filtered_count == 0 {
@@ -1358,20 +1415,30 @@ impl GuiClientApp {
             handled = true;
         }
 
-        // enter -> first copies, second executes
         if ctx.input(|i| i.key_pressed(egui::Key::Enter)) {
-            if let Some(command) = filtered_commands.get(self.selected_suggestion) {
+            let exact_match = filtered_commands
+                .iter()
+                .find(|cmd| cmd.name[1..].to_lowercase() == filter_text.to_lowercase());
+
+            let command = exact_match.or_else(|| filtered_commands.get(self.selected_suggestion));
+
+            if let Some(command) = command {
                 let requires_auth_warning = command.requires_auth && !self.nicked;
 
                 if requires_auth_warning {
                     self.error.show = ShowMode::ShowMaskScreen;
                     self.error.message = "You need to set a nickname first!".to_string();
-                } else if self.input.starts_with(&command.name) {
-                    // second enter -> execute
-                    self.execute_command();
                 } else {
-                    // first enter -> copy command to input
-                    self.input = command.name.clone();
+                    let should_execute = self.input.trim() == command.name
+                        || (self.input.len() > command.name.len()
+                            && self.input.starts_with(&command.name)
+                            && self.input.chars().nth(command.name.len()) == Some(' '));
+
+                    if should_execute {
+                        self.execute_command();
+                    } else {
+                        self.input = format!("{} ", command.name);
+                    }
                 }
 
                 self.show_command_suggestions = false;

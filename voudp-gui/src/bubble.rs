@@ -1,4 +1,3 @@
-use chrono::Local;
 use egui::{Color32, Pos2, Vec2};
 
 pub fn parse_chat_message(msg: &str) -> Option<(String, String, String)> {
@@ -24,37 +23,54 @@ pub fn parse_system_message(msg: &str) -> Option<(String, String)> {
 pub fn bubble_ui(
     ui: &mut egui::Ui,
     msg: &str,
-    time: &chrono::DateTime<Local>,
     text_color: egui::Color32,
-) {
+    username: Option<&str>, // optional for context menu
+    input: &mut String,
+) -> egui::Response {
     let bubble_color = if text_color == egui::Color32::WHITE {
         egui::Color32::from_rgb(0, 122, 255) // blue for self
     } else {
         egui::Color32::from_rgb(52, 199, 89) // gray for others
     };
 
-    egui::Frame::none()
+    let frame = egui::Frame::none()
         .fill(bubble_color)
         .rounding(egui::Rounding::same(12.0))
-        .inner_margin(egui::vec2(12.0, 8.0))
-        .show(ui, |ui| {
-            ui.set_max_width(300.0);
-            ui.horizontal(|ui| {
-                ui.style_mut().wrap = Some(true);
-                ui.label(egui::RichText::new(msg).color(text_color).size(14.0));
-                ui.style_mut().wrap = None;
-                ui.add_space(8.0);
-                ui.label(
-                    egui::RichText::new(format!("{}", time.format("%H:%M")))
-                        .color(if text_color == egui::Color32::WHITE {
-                            egui::Color32::from_rgb(200, 220, 255)
-                        } else {
-                            egui::Color32::from_rgb(120, 120, 120)
-                        })
-                        .size(11.0),
-                );
-            });
-        });
+        .inner_margin(egui::vec2(12.0, 8.0));
+
+    let inner = frame.show(ui, |ui| {
+        ui.set_max_width(300.0);
+        ui.style_mut().wrap = Some(true);
+        ui.label(egui::RichText::new(msg).color(text_color).size(14.0));
+        ui.style_mut().wrap = None;
+    });
+
+    let response = inner.response;
+
+    // Attach context menu to the bubble area
+    response.context_menu(|ui| {
+        if ui.button("↩ Reply").clicked() {
+            *input = format!("> {} \n\n", msg);
+            ui.close_menu();
+        }
+        if ui.button("📋 Copy message").clicked() {
+            ui.output_mut(|o| o.copied_text = msg.to_string());
+            ui.close_menu();
+        }
+        if let Some(name) = username
+            && ui.button("👤 Copy username").clicked()
+        {
+            ui.output_mut(|o| o.copied_text = name.to_string());
+            ui.close_menu();
+        }
+
+        if ui.button("🔊 Adjust volume").clicked() {
+            *input = format!("/volume {} ", username.unwrap_or("unknown"));
+            ui.close_menu();
+        }
+    });
+
+    response
 }
 
 pub fn badge(ui: &mut egui::Ui, text: impl Into<String>, color: egui::Color32) {
