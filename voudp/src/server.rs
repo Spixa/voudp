@@ -698,6 +698,24 @@ impl ServerState {
 
             drop(remote_guard);
 
+            if new_mask.is_empty()
+                || new_mask.len() > 16
+                || !new_mask.chars().all(|c| c.is_alphanumeric() || c == '_')
+            {
+                warn!(
+                    "Invalid mask '{}' from {} (must be alphanumeric, ≤16 chars), skipping...",
+                    new_mask, addr
+                );
+                Self::dm(
+                    &self.socket,
+                    addr,
+                    "Mask must be alphanumeric and no longer than 16 characters".into(),
+                );
+                let mask_fail_packet = vec![ClientPacketType::MaskFailed as u8, 0];
+                let _ = self.socket.send_reliable(mask_fail_packet, addr);
+                return;
+            }
+
             if new_mask.is_empty() {
                 return;
             }

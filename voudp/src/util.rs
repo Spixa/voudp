@@ -255,7 +255,7 @@ impl FromPacket for GlobalListPacket {
             });
         }
 
-        channels.sort_by(|a, b| a.channel_id.cmp(&b.channel_id));
+        channels.sort_by_key(|a| a.channel_id);
 
         Ok(GlobalListPacket { channels, current })
     }

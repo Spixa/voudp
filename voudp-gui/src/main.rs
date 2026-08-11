@@ -1169,8 +1169,7 @@ impl eframe::App for GuiClientApp {
                             self.global_list
                                 .channels
                                 .iter()
-                                .filter(|channel| channel.channel_id == id)
-                                .next_back()
+                                .rfind(|channel| channel.channel_id == id)
                                 .map(|info| info.name.clone())
                                 .unwrap_or(String::from("unknown"))
                         };

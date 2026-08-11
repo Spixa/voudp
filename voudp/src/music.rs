@@ -77,7 +77,7 @@ impl MusicClientState {
         self.first = false;
         let path = Path::new(&path);
 
-        let count = Path::new(&path)
+        let _count = Path::new(&path)
             .read_dir()
             .ok()
             .map(|dir| dir.enumerate().count())
@@ -186,15 +186,14 @@ impl MusicClientState {
                         }
                     });
 
-                    for (num, entry) in dir.enumerate() {
+                    for (_num, entry) in dir.enumerate() {
                         match entry {
                             Ok(entry) => {
                                 if entry.file_type().unwrap().is_file() {
                                     let p = entry.file_name().to_str().unwrap().to_string();
                                     let mut nick_packet = vec![0x04];
-                                    nick_packet.extend_from_slice(
-                                        format!("Music ({}/{count})", num + 1).as_bytes(),
-                                    );
+                                    nick_packet
+                                        .extend_from_slice("music_player".as_bytes());
 
                                     *self.current.lock().unwrap() = p.clone();
                                     let _ = self.socket.send(&nick_packet);

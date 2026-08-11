@@ -1,3 +1,5 @@
+use std::net::SocketAddr;
+
 // console_commands.rs
 use crate::server::{Channel, ServerConfig};
 use crate::socket::SecureUdpSocket;
@@ -14,6 +16,26 @@ pub fn handle_command(
     _socket_sender: Option<&mut SecureUdpSocket>,
 ) -> ConsoleCommandResult {
     match cmd {
+        "kick" => {
+            if parts.len() < 2 {
+                return ConsoleCommandResult::Reply("usage: kick <addr | mask>".into());
+            }
+
+            if let Ok(ip) = parts.get(1).unwrap().parse::<SocketAddr>() {
+                channels.iter_mut().for_each(|(_, chan)| {
+                    let remote = chan.remotes.iter_mut().find(|remote| {
+                        let remote = remote.lock().unwrap();
+                        remote.addr == ip
+                    });
+
+                    if let Some(remote) = remote {
+                        let _a = remote.lock().unwrap();
+                    }
+                });
+            }
+
+            ConsoleCommandResult::Reply("ok".into())
+        }
         "help" => ConsoleCommandResult::Reply("you are connected to a voudp 0.1 server".into()),
         "ping" => ConsoleCommandResult::Reply("pong".into()),
         "list" => {
