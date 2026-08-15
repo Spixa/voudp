@@ -1,3 +1,5 @@
+use sha2::{Digest, Sha256};
+
 use crate::protocol::{
     ClientPacketType, CommandResultPacketType, ControlRequest, FromPacket, IntoPacket, PacketError,
 };
@@ -59,6 +61,10 @@ pub fn ask(prompt: &str) -> String {
         .read_line(&mut answer)
         .expect("failed to readline");
     answer.trim().into()
+}
+
+pub fn sha256(data: &[u8]) -> [u8; 32] {
+    Sha256::digest(data).into()
 }
 
 pub fn is_whitespace_only(s: &str) -> bool {

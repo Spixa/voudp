@@ -47,7 +47,7 @@ pub struct MusicClientState {
 
 impl MusicClientState {
     pub fn new(addr: &str, channel_id: u32, phrase: &[u8]) -> Result<Self> {
-        let key = socket::derive_key_from_phrase(phrase, protocol::VOUDP_SALT);
+        let key = socket::derive_psk_from_phrase(phrase, protocol::VOUDP_SALT);
         let socket = SecureUdpSocket::create("0.0.0.0:0".into(), key)?;
         socket.connect(addr)?;
 
@@ -63,15 +63,16 @@ impl MusicClientState {
 
     pub fn run(&mut self, path: String) -> Result<()> {
         if self.first {
-            let mut join_packet = ClientPacketType::Join.to_bytes();
-            join_packet.extend_from_slice(&(1u32).to_be_bytes());
-            self.socket.send(&join_packet)?;
+            // TODO: fix handshake
+            // let mut join_packet = ClientPacketType::Join.to_bytes();
+            // join_packet.extend_from_slice(&(1u32).to_be_bytes());
+            // self.socket.send(&join_packet)?;
 
-            if self.channel_id != 1 {
-                let mut join_packet = ClientPacketType::Join.to_bytes();
-                join_packet.extend_from_slice(&self.channel_id.to_be_bytes());
-                self.socket.send(&join_packet)?;
-            }
+            // if self.channel_id != 1 {
+            //     let mut join_packet = ClientPacketType::Join.to_bytes();
+            //     join_packet.extend_from_slice(&self.channel_id.to_be_bytes());
+            //     self.socket.send(&join_packet)?;
+            // }
         }
 
         self.first = false;
@@ -192,8 +193,7 @@ impl MusicClientState {
                                 if entry.file_type().unwrap().is_file() {
                                     let p = entry.file_name().to_str().unwrap().to_string();
                                     let mut nick_packet = vec![0x04];
-                                    nick_packet
-                                        .extend_from_slice("music_player".as_bytes());
+                                    nick_packet.extend_from_slice("music_player".as_bytes());
 
                                     *self.current.lock().unwrap() = p.clone();
                                     let _ = self.socket.send(&nick_packet);

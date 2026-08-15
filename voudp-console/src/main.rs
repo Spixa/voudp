@@ -118,7 +118,7 @@ fn main() -> Result<(), std::io::Error> {
 
     println!("Generating key...");
 
-    let key = socket::derive_key_from_phrase(phrase.as_bytes(), VOUDP_SALT);
+    let key = socket::derive_psk_from_phrase(phrase.as_bytes(), VOUDP_SALT);
     let socket = SecureUdpSocket::create("0.0.0.0:0".to_owned(), key)?;
     // socket.connect(ip.clone())?;
 

@@ -1,6 +1,8 @@
 pub mod client;
 pub mod commands;
 pub mod console_cmd;
+pub mod db;
+pub mod handshake;
 pub mod mixer;
 pub mod music;
 pub mod plugin;

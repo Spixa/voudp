@@ -1,3 +1,5 @@
+use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit};
+use ed25519_dalek::{Signer, SigningKey, pkcs8::DecodePrivateKey};
 use log::{error, info, warn};
 use opus2::{Application, Channels as OpusChannels, Decoder, Encoder};
 use ringbuf::{
@@ -16,20 +18,22 @@ use std::{
     },
     time::{Duration, Instant},
 };
+use x25519_dalek::{EphemeralSecret, PublicKey};
 
 use crate::{
     commands::CommandSystem,
     console_cmd::{ConsoleCommandResult, handle_command},
+    db,
+    handshake::{HandshakeMessage, HandshakeStep, RemoteSessionState},
     mixer,
     plugin::{PluginAction, PluginManager},
     protocol::{
         self, ClientPacketType, ConsolePacketType, ControlRequest, FromPacket, IntoPacket, PASSWORD,
     },
-    socket::{self, SecureUdpSocket},
-    timeline::ChannelTimeline,
+    socket::{self, SecureUdpSocket, derive_session_key},
     util::{
         self, BroadcastPacket, CommandCategory, CommandContext, CommandResult, ControlPacket,
-        ServerCommand,
+        ServerCommand, sha256,
     },
 };
 const JITTER_BUFFER_LEN: usize = 50;
@@ -93,14 +97,15 @@ pub struct Remote {
     last_active: Instant,
     channel_id: u32,
     pub(crate) addr: SocketAddr,
-    mask: Option<String>,
+    username: Option<String>,
     jitter_buffer: VecDeque<Vec<f32>>,
     pub(crate) status: RemoteStatus,
     pub(crate) volume_settings: HashMap<String, f32>,
+    pub(crate) session_cipher: ChaCha20Poly1305,
 }
 
 impl Remote {
-    fn new(addr: SocketAddr, sample_rate: u32) -> Result<Self, opus2::Error> {
+    fn new(addr: SocketAddr, sample_rate: u32, session_key: Key) -> Result<Self, opus2::Error> {
         let mut encoder = Encoder::new(sample_rate, OpusChannels::Stereo, Application::Audio)?;
         let decoder = Decoder::new(sample_rate, OpusChannels::Stereo)?;
 
@@ -113,13 +118,17 @@ impl Remote {
             "New remote has initialized with addr {} (sample rate: {}, audio: {})",
             addr, sample_rate, "Stereo"
         );
+
+        let session_cipher = ChaCha20Poly1305::new(&session_key);
+
         Ok(Self {
             encoder,
             decoder,
             last_active: Instant::now(),
             channel_id: 0,
             addr,
-            mask: None,
+            username: None,
+            session_cipher,
             jitter_buffer: VecDeque::with_capacity(JITTER_BUFFER_LEN),
             status: Default::default(),
             volume_settings: HashMap::new(),
@@ -159,7 +168,6 @@ pub struct Channel {
     pub buffers: HashMap<SocketAddr, Vec<f32>>,
     pub filter_states: HashMap<SocketAddr, (f32, f32)>,
     pub server_config: ServerConfig,
-    timeline: ChannelTimeline,
 }
 
 impl Channel {
@@ -176,7 +184,6 @@ impl Channel {
             buffers: HashMap::new(),
             filter_states: HashMap::new(),
             server_config,
-            timeline: ChannelTimeline::default(),
         }
     }
 
@@ -211,7 +218,7 @@ impl Channel {
                 .remotes
                 .iter()
                 .find(|r| r.lock().unwrap().addr == *addr)
-                .and_then(|r| r.lock().unwrap().mask.clone());
+                .and_then(|r| r.lock().unwrap().username.clone());
 
             processed_buffers.insert(*addr, (processed, speaker_mask));
         }
@@ -288,15 +295,36 @@ impl Channel {
             }
         }
 
-        // Clear buffers for next tick
+        // clear buffers for next tick
         for buf in self.buffers.values_mut() {
             buf.fill(0.0);
         }
     }
 }
 
+pub type UnauthRemotes = Arc<Mutex<HashMap<SocketAddr, RemoteSessionState>>>;
+
+pub fn start_cleaner_thread(remotes: UnauthRemotes) {
+    std::thread::spawn(move || {
+        loop {
+            std::thread::sleep(Duration::from_secs(2));
+
+            let now = Instant::now();
+            let mut map = remotes.lock().unwrap();
+            map.retain(|_, state| now.duration_since(state.created) < Duration::from_secs(10));
+        }
+    });
+}
+
+fn load_signing_key(pem_path: &str) -> io::Result<ed25519_dalek::SigningKey> {
+    let pem = std::fs::read_to_string(pem_path)?;
+    ed25519_dalek::SigningKey::from_pkcs8_pem(&pem)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid PEM"))
+}
+
 pub struct ServerState {
     socket: Arc<SecureUdpSocket>,
+    unauths: UnauthRemotes,
     remotes: HashMap<SocketAddr, SafeRemote>,
     consoles: HashMap<SocketAddr, SafeConsole>,
     channels: HashMap<u32, Channel>,
@@ -305,13 +333,14 @@ pub struct ServerState {
     command_system: CommandSystem,
     plugin_manager: PluginManager,
     plugin_rx: Receiver<PluginAction>,
+    signing_key: SigningKey,
 }
 
 impl ServerState {
     pub fn new(config: ServerConfig, phrase: &[u8]) -> Result<Self, io::Error> {
         info!("v{} VoUDP protocol server", protocol::VERSION);
         info!("Deriving key from phrase...");
-        let key = socket::derive_key_from_phrase(phrase, protocol::VOUDP_SALT);
+        let key = socket::derive_psk_from_phrase(phrase, protocol::VOUDP_SALT);
         let socket = SecureUdpSocket::create(format!("0.0.0.0:{}", config.bind_port), key)?;
 
         info!("Bound to 0.0.0.0:{}", config.bind_port);
@@ -390,7 +419,7 @@ impl ServerState {
                         remote
                             .lock()
                             .unwrap()
-                            .mask
+                            .username
                             .clone()
                             .is_some_and(|r| r.eq(&ctx.arguments[0]))
                     });
@@ -453,6 +482,11 @@ impl ServerState {
 
         plugin_manager.log_loaded();
 
+        let unauths = Arc::new(Mutex::new(HashMap::new()));
+        start_cleaner_thread(unauths.clone());
+
+        let signing_key = load_signing_key("server_private.pem")?;
+
         Ok(Self {
             socket: Arc::clone(&socket),
             remotes: HashMap::new(),
@@ -462,6 +496,8 @@ impl ServerState {
             config,
             command_system,
             plugin_manager,
+            unauths,
+            signing_key,
             plugin_rx,
         })
     }
@@ -523,10 +559,10 @@ impl ServerState {
 
         type Cpt = ClientPacketType;
         match ClientPacketType::try_from(data[0]) {
-            Ok(Cpt::Join) => self.handle_join(addr, &data[1..]),
+            Ok(Cpt::Handshake) => self.handle_handshake(addr, &data[1..]),
             Ok(Cpt::Audio) => self.handle_audio(addr, &data[1..]),
             Ok(Cpt::Eof) => self.handle_eof(addr),
-            Ok(Cpt::Mask) => self.handle_mask(addr, &data[1..]),
+            // Ok(Cpt::Mask) => self.handle_mask(addr, &data[1..]),
             Ok(Cpt::List) => self.handle_list(addr),
             Ok(Cpt::Chat) => self.handle_chat(addr, &data[1..]),
             Ok(Cpt::Ctrl) => self.handle_ctrl(addr, &data[1..]),
@@ -555,75 +591,218 @@ impl ServerState {
         }
     }
 
-    fn handle_join(&mut self, addr: SocketAddr, data: &[u8]) {
-        if data.len() < 4 {
-            return;
-        }
+    fn send_handshake(&self, addr: SocketAddr, msg: &HandshakeMessage) -> io::Result<()> {
+        let mut packet = vec![ClientPacketType::Handshake as u8];
+        packet.extend_from_slice(&msg.encode());
+        self.socket.send_reliable(packet, addr)
+    }
 
-        let chan_id = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
-
-        if chan_id == 0 && chan_id >= u16::MAX as u32 {
-            warn!("{addr} tried to join channel with id {chan_id}, but that id is invalid");
-            return;
-        }
-
-        info!("{} has joined the channel with id {}", addr, chan_id);
-
-        if !self.remotes.contains_key(&addr) && !self.plugin_manager.dispatch_join(addr, chan_id) {
-            info!("Plugins prevented {addr} from joining");
-            self.kick_socket(
-                addr,
-                Some("Server plugins blocked you from joining".to_owned()),
-            );
-            return;
-        }
-
-        let remote = self.remotes.entry(addr).or_insert_with(|| {
-            info!("{} is a new remote", addr);
-
-            Arc::new(Mutex::new(
-                Remote::new(addr, self.config.sample_rate).expect("remote creation failed"),
-            ))
-        });
-
-        let (old_channel_id, mask) = {
-            let mut remote_guard = remote.lock().unwrap();
-            let old_id = remote_guard.channel_id;
-            let mask = remote_guard.mask.clone();
-            remote_guard.channel_id = chan_id;
-            (old_id, mask)
+    fn handle_handshake(&mut self, addr: SocketAddr, data: &[u8]) {
+        let msg = match HandshakeMessage::decode(data) {
+            Ok(m) => m,
+            Err(e) => {
+                warn!("{addr} sent malformed handshake: {e}");
+                return;
+            }
         };
 
-        if old_channel_id != chan_id
-            && old_channel_id != 0
-            && let Some(old_channel) = self.channels.get_mut(&old_channel_id)
-        {
-            old_channel.remove_remote(&addr);
-        }
+        match msg {
+            HandshakeMessage::ClientHello {
+                session_id,
+                c_nonce,
+            } => {
+                let s_nonce = rand::random::<[u8; 32]>();
 
-        if let Some(mask) = mask {
-            self.broadcast_join(chan_id, mask);
-        }
+                // generate eph keypair
+                let eph_secret = EphemeralSecret::random();
+                let e_pub_s = PublicKey::from(&eph_secret).to_bytes();
 
-        // add to new channel
-        let channel = self
-            .channels
-            .entry(chan_id)
-            .or_insert_with(|| Channel::new(self.config, format!("general-{chan_id}"), chan_id));
+                let msg_to_sign = [c_nonce.as_ref(), s_nonce.as_ref(), e_pub_s.as_ref()].concat();
+                let signature = self.signing_key.sign(&msg_to_sign);
 
-        if let Some(channel_name) = &channel.name {
-            Self::dm(
-                &self.socket,
-                addr,
-                format!("You have been moved to #{channel_name}"),
-            );
-        }
+                let server_pub_bytes = self.signing_key.verifying_key().to_bytes();
+                let reply = HandshakeMessage::ServerHello {
+                    session_id,
+                    s_nonce,
+                    e_pub_s,
+                    server_pub_bytes,
+                    signature: signature.to_bytes(),
+                };
+                let _ = self.send_handshake(addr, &reply);
 
-        if let Some(remote) = self.remotes.get(&addr) {
-            channel.add_remote(remote.clone());
-            self.handle_list(addr);
+                // store session state
+                let state = RemoteSessionState {
+                    step: HandshakeStep::ServerHello,
+                    session_id,
+                    c_nonce,
+                    s_nonce,
+                    eph_secret: Some(eph_secret),
+                    client_addr: addr,
+                    created: Instant::now(),
+                };
+
+                self.unauths.lock().unwrap().insert(addr, state);
+            }
+            HandshakeMessage::ServerHello { .. } => {
+                warn!("{addr} sent S2C packet {:?}", msg);
+            }
+            HandshakeMessage::ClientCreds {
+                session_id,
+                e_pub_c,
+                username,
+                challenge_response,
+            } => {
+                let mut map = self.unauths.lock().unwrap();
+
+                if let Some(state) = map.get_mut(&addr) {
+                    if state.step != HandshakeStep::ServerHello {
+                        warn!("{addr} is at an unexpected step");
+                        return;
+                    }
+
+                    if state.session_id != session_id {
+                        warn!("{addr}'s session id mismatches");
+                    }
+
+                    let client_pub = PublicKey::from(e_pub_c);
+
+                    let eph_secret = if let Some(secret) = state.eph_secret.take() {
+                        secret
+                    } else {
+                        warn!(
+                            "remote state of {} did not contain ephemeral secret (VERY peculiar)",
+                            state.client_addr
+                        );
+                        return;
+                    };
+
+                    let shared_secret = eph_secret.diffie_hellman(&client_pub);
+
+                    let session_key = derive_session_key(
+                        shared_secret.as_bytes(),
+                        &state.c_nonce,
+                        &state.s_nonce,
+                    );
+
+                    let username = if let Ok(username) = String::from_utf8(username.to_vec()) {
+                        username
+                    } else {
+                        warn!("invalid username string received from {addr}");
+                        return;
+                    };
+
+                    let stored_hash = db::lookup_password(&username);
+                    let expected = sha256(&[state.s_nonce.as_ref(), stored_hash.as_ref()].concat());
+                    if challenge_response != expected {
+                        warn!("incorrect credentials received from client!");
+                        return;
+                    }
+                    let confirmation =
+                        sha256(&[state.c_nonce.as_ref(), state.s_nonce.as_ref(), b"OK"].concat());
+                    let confirm = HandshakeMessage::ServerConfirm {
+                        session_id,
+                        confirmation,
+                    };
+
+                    let _ = self.send_handshake(addr, &confirm);
+
+                    map.remove(&addr);
+
+                    println!("{username} is now authenticated!");
+
+                    let remote = self.remotes.insert(
+                        addr,
+                        Arc::new(Mutex::new(
+                            Remote::new(addr, self.config.sample_rate, session_key)
+                                .expect("remote creation failed"),
+                        )),
+                    );
+
+                    if let Some(remote) = remote {
+                        let mut remote = remote.lock().unwrap();
+                        remote.username = Some(username);
+                    }
+                } else {
+                    warn!(
+                        "{addr} tried sending credentials while not being part of the unauth map"
+                    );
+                };
+            }
+            HandshakeMessage::ServerConfirm { .. } => {
+                warn!("{addr} sent S2C packet {:?}", msg);
+            }
         }
     }
+
+    // fn handle_handshake(&mut self, addr: SocketAddr, data: &[u8]) {
+    //     if data.len() < 4 {
+    //         return;
+    //     }
+
+    //     let chan_id = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+
+    //     if chan_id == 0 && chan_id >= u16::MAX as u32 {
+    //         warn!("{addr} tried to join channel with id {chan_id}, but that id is invalid");
+    //         return;
+    //     }
+
+    //     info!("{} has joined the channel with id {}", addr, chan_id);
+
+    //     if !self.remotes.contains_key(&addr) && !self.plugin_manager.dispatch_join(addr, chan_id) {
+    //         info!("Plugins prevented {addr} from joining");
+    //         self.kick_socket(
+    //             addr,
+    //             Some("Server plugins blocked you from joining".to_owned()),
+    //         );
+    //         return;
+    //     }
+
+    //     let remote = self.remotes.entry(addr).or_insert_with(|| {
+    //         info!("{} is a new remote", addr);
+
+    //         Arc::new(Mutex::new(
+    //             Remote::new(addr, self.config.sample_rate).expect("remote creation failed"),
+    //         ))
+    //     });
+
+    //     let (old_channel_id, mask) = {
+    //         let mut remote_guard = remote.lock().unwrap();
+    //         let old_id = remote_guard.channel_id;
+    //         let mask = remote_guard.mask.clone();
+    //         remote_guard.channel_id = chan_id;
+    //         (old_id, mask)
+    //     };
+
+    //     if old_channel_id != chan_id
+    //         && old_channel_id != 0
+    //         && let Some(old_channel) = self.channels.get_mut(&old_channel_id)
+    //     {
+    //         old_channel.remove_remote(&addr);
+    //     }
+
+    //     if let Some(mask) = mask {
+    //         self.broadcast_join(chan_id, mask);
+    //     }
+
+    //     // add to new channel
+    //     let channel = self
+    //         .channels
+    //         .entry(chan_id)
+    //         .or_insert_with(|| Channel::new(self.config, format!("general-{chan_id}"), chan_id));
+
+    //     if let Some(channel_name) = &channel.name {
+    //         Self::dm(
+    //             &self.socket,
+    //             addr,
+    //             format!("You have been moved to #{channel_name}"),
+    //         );
+    //     }
+
+    //     if let Some(remote) = self.remotes.get(&addr) {
+    //         channel.add_remote(remote.clone());
+    //         self.handle_list(addr);
+    //     }
+    // }
 
     fn handle_audio(&mut self, addr: SocketAddr, data: &[u8]) {
         let Some(remote) = self.remotes.get(&addr) else {
@@ -631,7 +810,7 @@ impl ServerState {
         };
 
         let mut remote = remote.lock().unwrap();
-        if remote.mask.is_none() {
+        if remote.username.is_none() {
             return;
         }
 
@@ -650,7 +829,7 @@ impl ServerState {
         self.remotes.retain(|addr_got, remote| {
             if *addr_got == addr {
                 let channel_id = { remote.lock().unwrap().channel_id };
-                let nick = { remote.lock().unwrap().mask.clone() };
+                let nick = { remote.lock().unwrap().username.clone() };
                 if let Some(channel) = self.channels.get_mut(&channel_id) {
                     info!("{addr} has left");
 
@@ -677,82 +856,82 @@ impl ServerState {
     }
 
     // TODO: announce old mask in join message incase of renicking
-    fn handle_mask(&mut self, addr: SocketAddr, data: &[u8]) {
-        let (old_mask, new_mask, channel_id) = {
-            let Some(remote) = self.remotes.get(&addr) else {
-                warn!("Mask from unknown remote: {}, skipping request...", addr);
-                return;
-            };
+    // fn handle_mask(&mut self, addr: SocketAddr, data: &[u8]) {
+    //     let (old_mask, new_mask, channel_id) = {
+    //         let Some(remote) = self.remotes.get(&addr) else {
+    //             warn!("Mask from unknown remote: {}, skipping request...", addr);
+    //             return;
+    //         };
 
-            let remote_guard = remote.lock().unwrap();
-            let old_mask = remote_guard.mask.clone();
+    //         let remote_guard = remote.lock().unwrap();
+    //         let old_mask = remote_guard.username.clone();
 
-            let channel_id = remote_guard.channel_id;
-            let new_mask = match String::from_utf8(data.to_vec()) {
-                Ok(mask) => mask,
-                Err(_) => {
-                    warn!("Mask sent over is not UTF-8, skipping request...");
-                    return;
-                }
-            };
+    //         let channel_id = remote_guard.channel_id;
+    //         let new_mask = match String::from_utf8(data.to_vec()) {
+    //             Ok(mask) => mask,
+    //             Err(_) => {
+    //                 warn!("Mask sent over is not UTF-8, skipping request...");
+    //                 return;
+    //             }
+    //         };
 
-            drop(remote_guard);
+    //         drop(remote_guard);
 
-            if new_mask.is_empty()
-                || new_mask.len() > 16
-                || !new_mask.chars().all(|c| c.is_alphanumeric() || c == '_')
-            {
-                warn!(
-                    "Invalid mask '{}' from {} (must be alphanumeric, ≤16 chars), skipping...",
-                    new_mask, addr
-                );
-                Self::dm(
-                    &self.socket,
-                    addr,
-                    "Mask must be alphanumeric and no longer than 16 characters".into(),
-                );
-                let mask_fail_packet = vec![ClientPacketType::MaskFailed as u8, 0];
-                let _ = self.socket.send_reliable(mask_fail_packet, addr);
-                return;
-            }
+    //         if new_mask.is_empty()
+    //             || new_mask.len() > 16
+    //             || !new_mask.chars().all(|c| c.is_alphanumeric() || c == '_')
+    //         {
+    //             warn!(
+    //                 "Invalid mask '{}' from {} (must be alphanumeric, ≤16 chars), skipping...",
+    //                 new_mask, addr
+    //             );
+    //             Self::dm(
+    //                 &self.socket,
+    //                 addr,
+    //                 "Mask must be alphanumeric and no longer than 16 characters".into(),
+    //             );
+    //             let mask_fail_packet = vec![ClientPacketType::MaskFailed as u8, 0];
+    //             let _ = self.socket.send_reliable(mask_fail_packet, addr);
+    //             return;
+    //         }
 
-            if new_mask.is_empty() {
-                return;
-            }
+    //         if new_mask.is_empty() {
+    //             return;
+    //         }
 
-            if self
-                .remotes
-                .values()
-                .any(|r| r.lock().unwrap().mask.as_deref() == Some(&new_mask))
-            {
-                warn!("Mask '{}' already in use, skipping request...", new_mask);
-                Self::dm(&self.socket, addr, "Mask already in use".into());
+    //         if self
+    //             .remotes
+    //             .values()
+    //             .any(|r| r.lock().unwrap().username.as_deref() == Some(&new_mask))
+    //         {
+    //             warn!("Mask '{}' already in use, skipping request...", new_mask);
+    //             Self::dm(&self.socket, addr, "Mask already in use".into());
 
-                let mask_fail_packet = vec![ClientPacketType::MaskFailed as u8, 0];
-                let _ = self.socket.send_reliable(mask_fail_packet, addr);
-                return;
-            }
+    //             let mask_fail_packet = vec![ClientPacketType::MaskFailed as u8, 0];
+    //             let _ = self.socket.send_reliable(mask_fail_packet, addr);
+    //             return;
+    //         }
 
-            remote.lock().unwrap().mask = Some(new_mask.clone());
-            let channel = {
-                let id = remote.lock().unwrap().channel_id;
-                self.channels.get_mut(&id)
-            };
+    //         remote.lock().unwrap().username = Some(new_mask.clone());
+    //         let channel = {
+    //             let id = remote.lock().unwrap().channel_id;
+    //             self.channels.get_mut(&id)
+    //         };
 
-            if let Some(channel) = channel {
-                channel.timeline.ensure_user(&new_mask);
-            }
+    //         if let Some(channel) = channel {
+    //             channel.timeline.ensure_user(&new_mask);
+    //         }
 
-            (old_mask, new_mask, channel_id)
-        };
+    //         (old_mask, new_mask, channel_id)
+    //     };
 
-        info!(
-            "{} has masked as '{}' in channel {}",
-            addr, new_mask, channel_id
-        );
+    //     info!(
+    //         "{} has masked as '{}' in channel {}",
+    //         addr, new_mask, channel_id
+    //     );
 
-        self.broadcast_join_masked(channel_id, new_mask, old_mask);
-    }
+    //     self.broadcast_join_masked(channel_id, new_mask, old_mask);
+    // }
 
     fn handle_list(&self, addr: SocketAddr) {
         let Some(remote) = self.remotes.get(&addr) else {
@@ -781,7 +960,7 @@ impl ServerState {
                 .iter()
                 .map(|r| {
                     let r = r.lock().unwrap();
-                    (r.mask.clone(), r.status.mute, r.status.deaf)
+                    (r.username.clone(), r.status.mute, r.status.deaf)
                 })
                 .fold(
                     (vec![], 0),
@@ -843,7 +1022,7 @@ impl ServerState {
             };
             let remote = remote.lock().unwrap();
 
-            (remote.mask.clone(), remote.channel_id)
+            (remote.username.clone(), remote.channel_id)
         };
 
         let Some(channel) = self.channels.get(&chan_id) else {
@@ -944,7 +1123,7 @@ impl ServerState {
             };
 
             let remote = remote.lock().unwrap();
-            (remote.mask.clone(), remote.channel_id, false)
+            (remote.username.clone(), remote.channel_id, false)
         };
 
         // execute command
@@ -1209,7 +1388,7 @@ impl ServerState {
 
         self.remotes.retain(|addr, remote| {
             let last_active = { remote.lock().unwrap().last_active };
-            let nick = { remote.lock().unwrap().mask.clone() };
+            let nick = { remote.lock().unwrap().username.clone() };
             let channel_id = { remote.lock().unwrap().channel_id };
 
             if now.duration_since(last_active) > Duration::from_secs(self.config.timeout_secs) {
@@ -1245,11 +1424,13 @@ impl ServerState {
         while let Ok(action) = self.plugin_rx.try_recv() {
             match action {
                 PluginAction::Reply { to, msg } => {
-                    if let Some((addr, _)) = self
-                        .remotes
-                        .iter()
-                        .find(|r| r.1.lock().unwrap().mask.clone().is_some_and(|m| m == to))
-                    {
+                    if let Some((addr, _)) = self.remotes.iter().find(|r| {
+                        r.1.lock()
+                            .unwrap()
+                            .username
+                            .clone()
+                            .is_some_and(|m| m == to)
+                    }) {
                         Self::dm(&self.socket, *addr, msg);
                     }
                 }
@@ -1260,11 +1441,13 @@ impl ServerState {
                     todo!()
                 }
                 PluginAction::Kick { user, reason } => {
-                    if let Some((addr, _)) = self
-                        .remotes
-                        .iter()
-                        .find(|r| r.1.lock().unwrap().mask.clone().is_some_and(|m| m == user))
-                    {
+                    if let Some((addr, _)) = self.remotes.iter().find(|r| {
+                        r.1.lock()
+                            .unwrap()
+                            .username
+                            .clone()
+                            .is_some_and(|m| m == user)
+                    }) {
                         self.kick_socket(*addr, reason);
                     }
                 }

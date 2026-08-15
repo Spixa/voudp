@@ -1,20 +1,24 @@
 use anyhow::{Context, Result};
 use chrono::{DateTime, Local};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
+use ed25519_dalek::VerifyingKey;
+use ed25519_dalek::pkcs8::DecodePublicKey;
 use opus2::{Application, Channels, Decoder, Encoder};
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
+use std::net::{SocketAddr, ToSocketAddrs};
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, Instant};
 
+use crate::handshake::ClientHandshake;
 use crate::protocol::{self, ClientPacketType, FromPacket};
 use crate::socket::{self, SecureUdpSocket};
 use crate::util::{
     self, BroadcastPacket, ChannelInfo, ChatPacket, CommandListPacket, CommandResponsePacket,
-    CommandResult, FlowPacket, ForceAudio, GlobalListPacket, ServerCommand,
+    CommandResult, FlowPacket, ForceAudio, GlobalListPacket, ServerCommand, sha256,
 };
 
 const TARGET_FRAME_SIZE: usize = 960; // 20ms at 48kHz
@@ -51,6 +55,7 @@ pub struct ClientState {
     pub cmd_list: SafeCommandList,
     pub devices: Arc<Mutex<AudioDevices>>,
     pub glitter: Arc<AtomicBool>,
+    pub handshake: Arc<Mutex<ClientHandshake>>,
 }
 
 type OwnedMessage = (Message, DateTime<Local>);
@@ -77,10 +82,21 @@ type SafeCommandList = Arc<Mutex<Vec<ServerCommand>>>;
 
 impl ClientState {
     pub fn new(ip: &str, channel_id: u32, phrase: &[u8]) -> Result<Self, io::Error> {
-        let key = socket::derive_key_from_phrase(phrase, protocol::VOUDP_SALT);
+        let key = socket::derive_psk_from_phrase(phrase, protocol::VOUDP_SALT);
         let socket = SecureUdpSocket::create("0.0.0.0:0".into(), key)?; // let OS decide port
 
         socket.connect(ip)?;
+
+        let addr = ip
+            .to_socket_addrs()?
+            .into_iter()
+            .find(|a| a.is_ipv4())
+            .ok_or(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "bad server adress",
+            ))?;
+        let handshake = ClientHandshake::new(addr, "spixa".into(), "password".into());
+        let handshake = Arc::new(Mutex::new(handshake));
 
         Ok(Self {
             socket,
@@ -100,17 +116,14 @@ impl ClientState {
             cmd_list: Arc::new(Mutex::new(vec![])),
             devices: Arc::new(Mutex::new(AudioDevices::default())),
             glitter: Arc::new(AtomicBool::new(false)),
+            handshake,
         })
     }
 
-    pub fn join(&self, id: u32) -> Result<usize, std::io::Error> {
-        let join_packet = {
-            let mut p = vec![0x01];
-            p.extend_from_slice(&id.to_be_bytes());
-            p
-        };
+    pub fn join(&self) -> Result<(), std::io::Error> {
+        let mut handshake = self.handshake.lock().unwrap();
 
-        self.socket.send(&join_packet)
+        handshake.start(&self.socket)
     }
 
     pub fn run(&mut self, mode: Mode) -> Result<()> {
@@ -126,31 +139,35 @@ impl ClientState {
         let ping = self.ping.clone();
         let devices = self.devices.clone();
         let glitter = self.glitter.clone();
+        let handshake = self.handshake.clone();
 
         self.rx = Some(rx);
-        let id = { self.channel_id.lock().unwrap() };
         match mode {
             Mode::Repl => {
-                self.join(*id)?;
+                self.join()?;
                 Self::start_audio(
-                    socket, muted, deafened, connected, state, list, cmd_list, tx, mode, talking,
-                    ping, devices, glitter,
+                    socket,
+                    muted,
+                    deafened,
+                    connected,
+                    state,
+                    list,
+                    cmd_list,
+                    tx,
+                    mode,
+                    talking,
+                    ping,
+                    devices,
+                    glitter,
+                    self.handshake.clone(),
                 )?;
             }
             Mode::Gui => {
-                let join_packet = {
-                    let mut p = vec![0x01];
-                    p.extend_from_slice(&id.to_be_bytes());
-                    p
-                };
+                self.join()?;
                 thread::spawn(move || {
-                    if let Err(e) = socket.send(&join_packet) {
-                        eprintln!("send error: {e:?}");
-                        return;
-                    }
                     if let Err(e) = Self::start_audio(
                         socket, muted, deafened, connected, state, list, cmd_list, tx, mode,
-                        talking, ping, devices, glitter,
+                        talking, ping, devices, glitter, handshake,
                     ) {
                         eprintln!("audio thread error: {e:?}");
                     }
@@ -176,6 +193,7 @@ impl ClientState {
         ping: Arc<AtomicU16>,
         devices: Arc<Mutex<AudioDevices>>,
         glitter: Arc<AtomicBool>,
+        handshake: Arc<Mutex<ClientHandshake>>,
     ) -> Result<()> {
         let muted_clone = muted.clone();
         let deafened_clone = deafened.clone();
@@ -211,6 +229,7 @@ impl ClientState {
                     muted_clone,
                     ping,
                     glitter,
+                    handshake,
                 )
             });
         }
@@ -365,6 +384,13 @@ impl ClientState {
         }
     }
 
+    pub fn load_pinned_public_key_from_pem(pem_path: &str) -> io::Result<[u8; 32]> {
+        let pem = std::fs::read_to_string(pem_path)?;
+        let verifying_key = VerifyingKey::from_public_key_pem(&pem)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        Ok(verifying_key.to_bytes())
+    }
+
     fn network_thread(
         socket: SecureUdpSocket,
         input: Arc<Mutex<VecDeque<f32>>>,
@@ -377,6 +403,7 @@ impl ClientState {
         muted: Arc<AtomicBool>,
         ping: Arc<AtomicU16>,
         glitter: Arc<AtomicBool>,
+        handshake: Arc<Mutex<ClientHandshake>>,
     ) {
         let mut encoder = Encoder::new(48000, Channels::Stereo, Application::Audio).unwrap();
         let mut decoder = Decoder::new(48000, Channels::Stereo).unwrap();
@@ -439,6 +466,17 @@ impl ClientState {
             type Cpt = ClientPacketType;
             match socket.recv_from(&mut recv_buf) {
                 Ok((size, _)) if size > 1 => match Cpt::try_from(recv_buf[0]) {
+                    Ok(Cpt::Handshake) => {
+                        let mut handshake = handshake.lock().unwrap();
+
+                        let pub_bytes =
+                            Self::load_pinned_public_key_from_pem("server_public.pem").unwrap();
+                        let pin = sha256(&pub_bytes);
+
+                        if let Err(e) = handshake.process(&socket, &recv_buf[1..size], &pin) {
+                            eprintln!("Handshake process ran into a problem: {e}");
+                        }
+                    }
                     Ok(Cpt::Audio) => {
                         if size < 5 {
                             continue;
@@ -542,7 +580,7 @@ impl ClientState {
 
                         let _ = tx.send((Message::Kick(reason.clone()), Local::now()));
                     }
-                    Ok(Cpt::Join) | Ok(Cpt::Mask) | Ok(Cpt::Ctrl) | Ok(Cpt::RegisterConsole) => {}
+                    Ok(Cpt::Mask) | Ok(Cpt::Ctrl) | Ok(Cpt::RegisterConsole) => {}
                     Ok(Cpt::ForceAudio) => {
                         if let Ok(action) = ForceAudio::deserialize(&recv_buf[1..size]) {
                             match action.force_type {

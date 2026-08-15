@@ -3,6 +3,7 @@ use chacha20poly1305::{
     aead::{Aead, OsRng, rand_core::RngCore},
 };
 
+use hkdf::Hkdf;
 use pbkdf2::pbkdf2_hmac;
 use sha2::Sha256;
 use std::{
@@ -21,10 +22,22 @@ use std::{
 
 use crate::protocol::{ACK_FLAG, ClientPacketType, RELIABLE_FLAG};
 
-pub fn derive_key_from_phrase(phrase: &[u8], salt: &[u8]) -> Key {
+// outer encryption (DPI circumvention)
+pub fn derive_psk_from_phrase(phrase: &[u8], salt: &[u8]) -> Key {
     let iters = 600_000u32;
     let mut key_b = [0u8; 32];
     pbkdf2_hmac::<Sha256>(phrase, salt, iters, &mut key_b);
+
+    Key::from_slice(&key_b).to_owned()
+}
+
+// inner encryption (with forward secrecy)
+pub fn derive_session_key(shared: &[u8; 32], c_nonce: &[u8; 32], s_nonce: &[u8; 32]) -> Key {
+    let salt = [c_nonce.as_ref(), s_nonce.as_ref()].concat();
+    let hk = Hkdf::<Sha256>::new(Some(&salt), shared);
+
+    let mut key_b = [0u8; 32];
+    hk.expand(b"handshake-session-key", &mut key_b).unwrap(); // info paramter does domain separation
 
     Key::from_slice(&key_b).to_owned()
 }
@@ -196,7 +209,7 @@ impl SecureUdpSocket {
             return Ok((0, addr));
         }
 
-        // Reliable packet handling
+        // reliable packet handling
         if plaintext.len() >= 6 && plaintext[0] == RELIABLE_FLAG {
             let seq = u32::from_be_bytes(plaintext[1..5].try_into().unwrap());
             let _ = self.send_ack(seq, addr);

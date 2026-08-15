@@ -1322,14 +1322,15 @@ impl GuiClientApp {
     }
 
     fn join_channel(&self, id: u32) {
-        if let Some(client) = &self.client
-            && let Err(e) = client.lock().unwrap().join(id)
-        {
-            eprintln!(
-                "we faced an error when trying to join channel {}: {}",
-                id, e
-            );
-        }
+        // if let Some(client) = &self.client
+        //     && let Err(e) = client.lock().unwrap().join(id)
+        // {
+        //     eprintln!(
+        //         "we faced an error when trying to join channel {}: {}",
+        //         id, e
+        //     );
+        // }
+
         self.request_global_list();
     }
 

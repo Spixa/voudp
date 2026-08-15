@@ -14,8 +14,8 @@ pub const ACK_FLAG: u8 = 0x81;
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientPacketType {
-    // Handshake = 0x00,
-    Join = 0x01,
+    Handshake = 0x00,
+    // Join = 0x01,
     Audio = 0x02,
     Eof = 0x03,
     Mask = 0x04,
@@ -45,7 +45,7 @@ impl ClientPacketType {
     pub fn is_reliable(self) -> bool {
         matches!(
             self,
-            ClientPacketType::Join
+            ClientPacketType::Handshake
                 | ClientPacketType::Ctrl
                 | ClientPacketType::FlowJoin
                 | ClientPacketType::FlowLeave
@@ -93,7 +93,7 @@ impl TryFrom<u8> for ClientPacketType {
 
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
-            0x01 => Ok(Self::Join),
+            0x00 => Ok(Self::Handshake),
             0x02 => Ok(Self::Audio),
             0x03 => Ok(Self::Eof),
             0x04 => Ok(Self::Mask),
@@ -229,10 +229,7 @@ pub fn is_flow_packet(packet_type: ClientPacketType) -> bool {
 pub fn is_client_to_server_only(packet_type: ClientPacketType) -> bool {
     matches!(
         packet_type,
-        ClientPacketType::Join
-            | ClientPacketType::Mask
-            | ClientPacketType::Ctrl
-            | ClientPacketType::RegisterConsole
+        ClientPacketType::Mask | ClientPacketType::Ctrl | ClientPacketType::RegisterConsole
     )
 }
 
