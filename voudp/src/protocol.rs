@@ -15,7 +15,7 @@ pub const ACK_FLAG: u8 = 0x81;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ClientPacketType {
     Handshake = 0x00,
-    // Join = 0x01,
+    JoinChannel = 0x01,
     Audio = 0x02,
     Eof = 0x03,
     Mask = 0x04,
@@ -36,8 +36,7 @@ pub enum ClientPacketType {
     Broadcast = 0x13,
     ForceAudio = 0x14,
     Vivian = 0x15,
-    MaskFailed = 0x16,
-    // 0x17-0xfe are reserved
+    // 0x16-0xfe are reserved
     RegisterConsole = 0xff,
 }
 
@@ -46,6 +45,7 @@ impl ClientPacketType {
         matches!(
             self,
             ClientPacketType::Handshake
+                | ClientPacketType::JoinChannel
                 | ClientPacketType::Ctrl
                 | ClientPacketType::FlowJoin
                 | ClientPacketType::FlowLeave
@@ -56,8 +56,7 @@ impl ClientPacketType {
                 | ClientPacketType::Kick
                 | ClientPacketType::Broadcast
                 | ClientPacketType::ForceAudio
-                | ClientPacketType::Vivian
-                | ClientPacketType::MaskFailed,
+                | ClientPacketType::Vivian,
         )
     }
 }
@@ -94,6 +93,7 @@ impl TryFrom<u8> for ClientPacketType {
     fn try_from(value: u8) -> Result<Self, Self::Error> {
         match value {
             0x00 => Ok(Self::Handshake),
+            0x01 => Ok(Self::JoinChannel),
             0x02 => Ok(Self::Audio),
             0x03 => Ok(Self::Eof),
             0x04 => Ok(Self::Mask),
@@ -110,7 +110,6 @@ impl TryFrom<u8> for ClientPacketType {
             0x13 => Ok(Self::Broadcast),
             0x14 => Ok(Self::ForceAudio),
             0x15 => Ok(Self::Vivian),
-            0x16 => Ok(Self::MaskFailed),
             0xff => Ok(Self::RegisterConsole),
             _ => Err(value),
         }

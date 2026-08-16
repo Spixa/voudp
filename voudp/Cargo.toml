@@ -22,6 +22,8 @@ x25519-dalek = { version = "3.0.0", features = ["getrandom"] }
 pem = "4.0.0"
 hkdf = "0.12.4"
 hmac = "0.12.1"
+base64 = "0.22"
+hex = "0.4.3"
 
 # platform-specific dependencies (optional, for more control)
 [target.'cfg(windows)'.dependencies]

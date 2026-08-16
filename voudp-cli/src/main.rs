@@ -82,12 +82,14 @@ enum Mode {
         #[clap(long)]
         connect: String,
 
-        /// ID of the channel to connect to
-        #[clap(long, default_value_t = 1)]
-        channel_id: u32,
-
         #[clap(long)]
         phrase: String,
+
+        #[clap(long)]
+        username: String,
+
+        #[clap(long)]
+        password: String,
     },
 
     /// Start a client that streams audio from a file
@@ -115,10 +117,11 @@ fn main() -> Result<()> {
     match cli.mode {
         Mode::Client {
             connect,
-            channel_id,
             phrase,
+            username,
+            password,
         } => {
-            let mut client = ClientState::new(&connect, channel_id, &phrase.into_bytes())?;
+            let mut client = ClientState::new(&connect, &phrase.into_bytes(), username, password)?;
             client.run(client::Mode::Repl)?;
         }
 

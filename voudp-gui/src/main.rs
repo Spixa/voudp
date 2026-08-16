@@ -17,6 +17,7 @@ use std::{
 
 use voudp::{
     client::{self, ClientState, GlobalListState, Message},
+    protocol::ClientPacketType,
     socket::SecureUdpSocket,
     util::{CommandResult, ServerCommand},
 };
@@ -50,7 +51,6 @@ struct GuiClientApp {
     socket: Option<SecureUdpSocket>,
     current_channel_id: u32,
     address: String,
-    chan_id_text: String,
     phrase: String,
     is_connected: bool,
     muted: bool,
@@ -59,8 +59,8 @@ struct GuiClientApp {
     client_thread: Option<JoinHandle<()>>,
     error: ErrorWindow,
     input: String,
-    nick: String,
-    nicked: bool,
+    username: String,
+    password: String,
     logs: LogVec,
     show_command_suggestions: bool,
     selected_suggestion: usize,
@@ -76,12 +76,10 @@ enum ShowMode {
     #[default]
     DontShow,
     ShowError,
-    ShowMaskScreen,
 }
 
 enum CommandAction {
     UseCommand(String),
-    ShowNickWarning,
 }
 
 #[derive(Default)]
@@ -92,35 +90,24 @@ struct ErrorWindow {
 
 impl Default for GuiClientApp {
     fn default() -> Self {
-        let (address, phrase, chan_id_text) = if let Ok(mut file) = File::open(".voudp") {
-            let mut data = String::new();
-            file.read_to_string(&mut data).ok();
+        use std::fs;
 
-            if !data.is_empty() {
-                let split = data.split_whitespace().collect::<Vec<&str>>();
+        const DEFAULT_ADDR: &str = "127.0.0.1:37549";
 
-                if split.len() >= 3 {
-                    (split[0].into(), split[1].into(), split[2].into())
-                } else {
-                    (
-                        "127.0.0.1:37549".to_string(),
-                        "".to_string(),
-                        "1".to_string(),
-                    )
-                }
-            } else {
+        let (address, phrase, username) = if let Ok(data) = fs::read_to_string(".voudp") {
+            let tokens: Vec<&str> = data.split_whitespace().collect();
+
+            if tokens.len() >= 3 {
                 (
-                    "127.0.0.1:37549".to_string(),
-                    "".to_string(),
-                    "1".to_string(),
+                    tokens[0].to_string(),
+                    tokens[1].to_string(),
+                    tokens.get(3).map_or_else(String::new, |&s| s.to_string()),
                 )
+            } else {
+                (DEFAULT_ADDR.to_string(), String::new(), String::new())
             }
         } else {
-            (
-                "127.0.0.1:37549".to_string(),
-                "".to_string(),
-                "1".to_string(),
-            )
+            (DEFAULT_ADDR.to_string(), String::new(), String::new())
         };
 
         Self {
@@ -133,18 +120,17 @@ impl Default for GuiClientApp {
             },
             command_list: vec![],
             socket: None,
-            chan_id_text,
             phrase,
             is_connected: false,
             muted: false,
             deafened: false,
-            nicked: false,
             client: None,
             client_thread: None,
             error: Default::default(),
             logs: Default::default(),
             input: Default::default(),
-            nick: Default::default(),
+            username: Default::default(),
+            password: Default::default(),
             show_command_suggestions: false,
             selected_suggestion: 0,
             filter_text: String::new(),
@@ -207,97 +193,96 @@ impl eframe::App for GuiClientApp {
                     });
             }
 
-            ShowMode::ShowMaskScreen => {
-                egui::Window::new("Nickname Required")
-                    .collapsible(false)
-                    .resizable(false)
-                    .anchor(egui::Align2::CENTER_CENTER, [0.0, -40.0])
-                    .frame(
-                        egui::Frame::none()
-                            .fill(ctx.style().visuals.window_fill())
-                            .stroke(ctx.style().visuals.window_stroke())
-                            .rounding(12.0)
-                            .inner_margin(egui::Margin::symmetric(18.0, 16.0)),
-                    )
-                    .show(ctx, |ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.heading(
-                                egui::RichText::new("Choose a nickname")
-                                    .color(egui::Color32::YELLOW),
-                            );
-                        });
+            // ShowMode::ShowMaskScreen => {
+            //     egui::Window::new("Nickname Required")
+            //         .collapsible(false)
+            //         .resizable(false)
+            //         .anchor(egui::Align2::CENTER_CENTER, [0.0, -40.0])
+            //         .frame(
+            //             egui::Frame::none()
+            //                 .fill(ctx.style().visuals.window_fill())
+            //                 .stroke(ctx.style().visuals.window_stroke())
+            //                 .rounding(12.0)
+            //                 .inner_margin(egui::Margin::symmetric(18.0, 16.0)),
+            //         )
+            //         .show(ctx, |ui| {
+            //             ui.vertical_centered(|ui| {
+            //                 ui.heading(
+            //                     egui::RichText::new("Choose a nickname")
+            //                         .color(egui::Color32::YELLOW),
+            //                 );
+            //             });
 
-                        ui.add_space(10.0);
-                        ui.separator();
-                        ui.add_space(12.0);
+            //             ui.add_space(10.0);
+            //             ui.separator();
+            //             ui.add_space(12.0);
 
-                        ui.label(
-                            egui::RichText::new("🔌 Enter nickname").color(egui::Color32::GRAY),
-                        );
+            //             ui.label(
+            //                 egui::RichText::new("🔌 Enter nickname").color(egui::Color32::GRAY),
+            //             );
 
-                        let edit = ui.add(
-                            egui::TextEdit::singleline(&mut self.nick)
-                                .hint_text("Nickname")
-                                .desired_width(ui.available_width()),
-                        );
+            //             let edit = ui.add(
+            //                 egui::TextEdit::singleline(&mut self.username)
+            //                     .hint_text("Nickname")
+            //                     .desired_width(ui.available_width()),
+            //             );
 
-                        ui.memory_mut(|mem| mem.request_focus(edit.id));
+            //             ui.memory_mut(|mem| mem.request_focus(edit.id));
 
-                        let enter_pressed =
-                            edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+            //             let enter_pressed =
+            //                 edit.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
 
-                        ui.add_space(16.0);
+            //             ui.add_space(16.0);
 
-                        ui.with_layout(
-                            egui::Layout::top_down_justified(egui::Align::Center),
-                            |ui| {
-                                let use_nick = ui.add_enabled(
-                                    !self.nick.is_empty(),
-                                    egui::Button::new(
-                                        egui::RichText::new("Use nickname")
-                                            .strong()
-                                            .color(egui::Color32::BLACK),
-                                    )
-                                    .fill(egui::Color32::LIGHT_GREEN)
-                                    .min_size(egui::vec2(ui.available_width(), 34.0)),
-                                );
+            //             ui.with_layout(
+            //                 egui::Layout::top_down_justified(egui::Align::Center),
+            //                 |ui| {
+            //                     let use_nick = ui.add_enabled(
+            //                         !self.nick.is_empty(),
+            //                         egui::Button::new(
+            //                             egui::RichText::new("Use nickname")
+            //                                 .strong()
+            //                                 .color(egui::Color32::BLACK),
+            //                         )
+            //                         .fill(egui::Color32::LIGHT_GREEN)
+            //                         .min_size(egui::vec2(ui.available_width(), 34.0)),
+            //                     );
 
-                                if (use_nick.clicked() || enter_pressed) && !self.nick.is_empty() {
-                                    self.error.show = ShowMode::DontShow;
-                                    self.nicked = true;
-                                    self.set_nick();
+            //                     if (use_nick.clicked() || enter_pressed) && !self.nick.is_empty() {
+            //                         self.error.show = ShowMode::DontShow;
+            //                         self.nicked = true;
+            //                         self.set_nick();
 
-                                    if self.input.starts_with("/") {
-                                        self.execute_command();
-                                    } else {
-                                        self.send_message();
-                                    }
-                                }
-                            },
-                        );
+            //                         if self.input.starts_with("/") {
+            //                             self.execute_command();
+            //                         } else {
+            //                             self.send_message();
+            //                         }
+            //                     }
+            //                 },
+            //             );
 
-                        ui.add_space(8.0);
+            //             ui.add_space(8.0);
 
-                        ui.with_layout(
-                            egui::Layout::top_down_justified(egui::Align::Center),
-                            |ui| {
-                                let skip = ui.add_sized(
-                                    [ui.available_width(), 28.0],
-                                    egui::Button::new("Continue without nickname")
-                                        .fill(egui::Color32::from_gray(60)),
-                                );
+            //             ui.with_layout(
+            //                 egui::Layout::top_down_justified(egui::Align::Center),
+            //                 |ui| {
+            //                     let skip = ui.add_sized(
+            //                         [ui.available_width(), 28.0],
+            //                         egui::Button::new("Continue without nickname")
+            //                             .fill(egui::Color32::from_gray(60)),
+            //                     );
 
-                                if skip.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))
-                                {
-                                    self.error.show = ShowMode::DontShow;
-                                    self.nick.clear();
-                                    self.input.clear();
-                                }
-                            },
-                        );
-                    });
-            }
-
+            //                     if skip.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))
+            //                     {
+            //                         self.error.show = ShowMode::DontShow;
+            //                         self.nick.clear();
+            //                         self.input.clear();
+            //                     }
+            //                 },
+            //             );
+            //         });
+            // }
             ShowMode::DontShow => {}
         }
 
@@ -322,12 +307,10 @@ impl eframe::App for GuiClientApp {
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new("🔌").size(18.0));
                                     ui.add_space(4.0);
-
                                     let text_edit = egui::TextEdit::singleline(&mut self.address)
                                         .hint_text("server address (ip:port)")
                                         .desired_width(220.0)
-                                        .frame(false); // disable default ugly frame
-
+                                        .frame(false);
                                     egui::Frame::none()
                                         .fill(Color32::from_gray(30))
                                         .stroke(egui::Stroke::new(1.0, Color32::GRAY))
@@ -337,20 +320,17 @@ impl eframe::App for GuiClientApp {
                                             ui.add(text_edit);
                                         });
                                 });
-
                                 ui.add_space(8.0);
 
-                                // ----- Server Password -----
+                                // ----- Server Password (phrase) -----
                                 ui.horizontal(|ui| {
                                     ui.label(RichText::new("🔑").size(18.0));
                                     ui.add_space(4.0);
-
                                     let text_edit = egui::TextEdit::singleline(&mut self.phrase)
-                                        .hint_text("usually 'voudp'")
+                                        .hint_text("pre-shared key")
                                         .password(true)
                                         .desired_width(220.0)
                                         .frame(false);
-
                                     egui::Frame::none()
                                         .fill(Color32::from_gray(30))
                                         .stroke(egui::Stroke::new(1.0, Color32::GRAY))
@@ -360,21 +340,41 @@ impl eframe::App for GuiClientApp {
                                             ui.add(text_edit);
                                         });
                                 });
+                                ui.add_space(12.0);
 
+                                ui.separator();
+                                ui.add_space(6.0);
+                                ui.label(RichText::new("Authentication (v0.5+)").size(14.0).weak().color(Color32::from_gray(180)));
+                                ui.add_space(6.0);
+
+                                // ----- Username -----
+                                ui.horizontal(|ui| {
+                                    ui.label(RichText::new("👤").size(18.0));
+                                    ui.add_space(4.0);
+                                    let text_edit = egui::TextEdit::singleline(&mut self.username)
+                                        .hint_text("username")
+                                        .desired_width(220.0)
+                                        .frame(false);
+                                    egui::Frame::none()
+                                        .fill(Color32::from_gray(30))
+                                        .stroke(egui::Stroke::new(1.0, Color32::GRAY))
+                                        .rounding(6.0)
+                                        .inner_margin(egui::Margin::symmetric(6.0, 4.0))
+                                        .show(ui, |ui| {
+                                            ui.add(text_edit);
+                                        });
+                                });
                                 ui.add_space(8.0);
 
-                                // ----- Channel ID -----
+                                // ----- Password -----
                                 ui.horizontal(|ui| {
-                                    ui.label(RichText::new("🔗").size(18.0));
+                                    ui.label(RichText::new("🔒").size(18.0));
                                     ui.add_space(4.0);
-
-                                    let text_edit =
-                                        egui::TextEdit::singleline(&mut self.chan_id_text)
-                                            .hint_text("ID")
-                                            .char_limit(2)
-                                            .desired_width(60.0)
-                                            .frame(false);
-
+                                    let text_edit = egui::TextEdit::singleline(&mut self.password)
+                                        .hint_text("password")
+                                        .password(true)
+                                        .desired_width(220.0)
+                                        .frame(false);
                                     egui::Frame::none()
                                         .fill(Color32::from_gray(30))
                                         .stroke(egui::Stroke::new(1.0, Color32::GRAY))
@@ -384,8 +384,22 @@ impl eframe::App for GuiClientApp {
                                             ui.add(text_edit);
                                         });
                                 });
-
                                 ui.add_space(15.0);
+
+                                ui.add_space(4.0);
+                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
+                                    ui.add(
+                                        egui::Label::new(
+                                            RichText::new("To be registered, you need to be inserted in the server's database. contact a server admin")
+                                                .size(12.0)
+                                                .weak()
+                                                .color(Color32::from_gray(150))
+                                                .italics(),
+                                        )
+                                        .wrap(false), // prevents wrapping and keeps height minimal
+                                    );
+                                });
+                                ui.add_space(6.0);
 
                                 // ----- Connect Button -----
                                 let connect_size = [150.0, 32.0];
@@ -402,20 +416,12 @@ impl eframe::App for GuiClientApp {
                                     )
                                     .clicked()
                                 {
-                                    // ----- Connection logic -----
-                                    let chan_id = match self.chan_id_text.parse::<u32>() {
-                                        Ok(num) => num,
-                                        Err(_) => {
-                                            self.error.show = ShowMode::ShowError;
-                                            self.error.message = "Bad channel ID".into();
-                                            return;
-                                        }
-                                    };
-
+                                    // Try to connect
                                     match ClientState::new(
                                         &self.address,
-                                        chan_id,
                                         &self.phrase.clone().into_bytes(),
+                                        self.username.clone(),
+                                        self.password.clone(),
                                     ) {
                                         Ok(state) => {
                                             self.socket = Some(state.socket.clone());
@@ -439,8 +445,7 @@ impl eframe::App for GuiClientApp {
                                         }
                                     }
 
-                                    // self.request_global_list();
-
+                                    // save credentials to .voudp (now with all 4 fields)
                                     let file = match File::create_new(".voudp") {
                                         Ok(file) => Some(file),
                                         Err(e) if e.kind() == io::ErrorKind::AlreadyExists => {
@@ -454,12 +459,12 @@ impl eframe::App for GuiClientApp {
                                     };
 
                                     if let Some(mut file) = file {
+                                        // Write address, phrase, username, and password
                                         let _ = writeln!(
                                             file,
                                             "{} {} {}",
-                                            self.address, self.phrase, self.chan_id_text
+                                            self.address, self.phrase, self.username
                                         );
-
                                         let _ = file.flush();
                                     }
                                 }
@@ -829,19 +834,19 @@ impl eframe::App for GuiClientApp {
                         );
                     }
 
-                    // ----- Renick -----
-                    if ui
-                        .add_sized(
-                            [button_width, button_height],
-                            egui::Button::new(RichText::new("Renick").strong())
-                                .fill(Color32::from_rgb(80, 120, 180))
-                                .stroke(egui::Stroke::new(1.0, Color32::BLACK))
-                                .rounding(6.0),
-                        )
-                        .clicked()
-                    {
-                        self.error.show = ShowMode::ShowMaskScreen;
-                    }
+                    // ----- Renick ----- [REMOVE]
+                    // if ui
+                    //     .add_sized(
+                    //         [button_width, button_height],
+                    //         egui::Button::new(RichText::new("Renick").strong())
+                    //             .fill(Color32::from_rgb(80, 120, 180))
+                    //             .stroke(egui::Stroke::new(1.0, Color32::BLACK))
+                    //             .rounding(6.0),
+                    //     )
+                    //     .clicked()
+                    // {
+                    //     self.error.show = ShowMode::ShowMaskScreen;
+                    // }
 
                     // ----- Clear Logs -----
                     if ui
@@ -1218,10 +1223,6 @@ impl eframe::App for GuiClientApp {
                         self.error.message = msg;
                         self.error.show = ShowMode::ShowError;
                     }
-                    Message::MaskFailed => {
-                        self.nicked = false;
-                        self.nick = String::new();
-                    }
                 },
                 Err(TryRecvError::Empty) => thread::yield_now(),
                 Err(TryRecvError::Disconnected) => {}
@@ -1264,10 +1265,9 @@ impl GuiClientApp {
             handle.join().ok();
         }
         self.is_connected = false;
-        self.nicked = false;
-        self.nick = String::new();
         self.client = None;
     }
+
     fn talking_indicator(&mut self, ui: &mut egui::Ui) -> egui::Response {
         let is_talking = self.client.clone();
 
@@ -1309,14 +1309,14 @@ impl GuiClientApp {
 
     fn request_global_list(&self) {
         if let Some(client) = &self.client {
-            let packet = vec![0x05]; // Request global list
+            let packet = vec![ClientPacketType::List as u8]; // Request global list
             client.lock().unwrap().send(&packet);
         }
     }
 
     fn request_command_list(&self) {
         if let Some(client) = &self.client {
-            let packet = vec![0x0c]; // Request global list
+            let packet = vec![ClientPacketType::SyncCommands as u8]; // Request global list
             client.lock().unwrap().send(&packet);
         }
     }
@@ -1423,22 +1423,17 @@ impl GuiClientApp {
             let command = exact_match.or_else(|| filtered_commands.get(self.selected_suggestion));
 
             if let Some(command) = command {
-                let requires_auth_warning = command.requires_auth && !self.nicked;
+                let _requires_auth_warning = command.requires_auth;
 
-                if requires_auth_warning {
-                    self.error.show = ShowMode::ShowMaskScreen;
-                    self.error.message = "You need to set a nickname first!".to_string();
+                let should_execute = self.input.trim() == command.name
+                    || (self.input.len() > command.name.len()
+                        && self.input.starts_with(&command.name)
+                        && self.input.chars().nth(command.name.len()) == Some(' '));
+
+                if should_execute {
+                    self.execute_command();
                 } else {
-                    let should_execute = self.input.trim() == command.name
-                        || (self.input.len() > command.name.len()
-                            && self.input.starts_with(&command.name)
-                            && self.input.chars().nth(command.name.len()) == Some(' '));
-
-                    if should_execute {
-                        self.execute_command();
-                    } else {
-                        self.input = format!("{} ", command.name);
-                    }
+                    self.input = format!("{} ", command.name);
                 }
 
                 self.show_command_suggestions = false;
@@ -1517,20 +1512,13 @@ impl GuiClientApp {
                         .show(ui, |ui| {
                             for (i, command) in filtered_commands.iter().enumerate() {
                                 let is_selected = i == self.selected_suggestion;
-                                let requires_auth_warning = command.requires_auth && !self.nicked;
 
                                 let row_response = ui
                                     .horizontal(|ui| {
-                                        let name_display = if requires_auth_warning {
-                                            format!("⚠ {}", command.name)
-                                        } else {
-                                            command.name.clone()
-                                        };
+                                        let name_display = command.name.clone();
 
                                         let name_color = if is_selected {
                                             Color32::WHITE
-                                        } else if requires_auth_warning {
-                                            Color32::YELLOW
                                         } else {
                                             Color32::LIGHT_BLUE
                                         };
@@ -1560,20 +1548,12 @@ impl GuiClientApp {
                                 }
 
                                 if row_response.clicked() {
-                                    if requires_auth_warning {
-                                        action_to_take = Some(CommandAction::ShowNickWarning);
-                                    } else {
-                                        action_to_take =
-                                            Some(CommandAction::UseCommand(command.name.clone()));
-                                    }
+                                    action_to_take =
+                                        Some(CommandAction::UseCommand(command.name.clone()));
                                 }
 
                                 if row_response.hovered() {
                                     let mut tooltip = command.description.clone();
-                                    if requires_auth_warning {
-                                        tooltip =
-                                            format!("{}\n\n⚠ Requires nickname first!", tooltip);
-                                    }
                                     if command.admin_only {
                                         tooltip = format!("{}\n\n🛡️ Admin only", tooltip);
                                     }
@@ -1596,11 +1576,6 @@ impl GuiClientApp {
                 self.input = format!("{} ", cmd_name);
                 self.show_command_suggestions = false;
                 ui.ctx().memory_mut(|mem| mem.request_focus(input_id));
-            }
-            Some(CommandAction::ShowNickWarning) => {
-                self.error.show = ShowMode::ShowMaskScreen;
-                self.error.message = "You need to set a nickname first!".to_string();
-                self.show_command_suggestions = false;
             }
             None => {}
         }
@@ -1656,7 +1631,7 @@ impl GuiClientApp {
         self.show_command_suggestions = false;
         self.selected_suggestion = 0;
 
-        let mut msg = vec![0x0d];
+        let mut msg = vec![ClientPacketType::Cmd as u8];
         msg.extend_from_slice(self.input.as_bytes());
 
         if let Some(socket) = &self.socket {
@@ -1678,12 +1653,7 @@ impl GuiClientApp {
             return;
         }
 
-        if !self.nicked {
-            self.error.show = ShowMode::ShowMaskScreen;
-            return;
-        }
-
-        let mut msg = vec![0x06];
+        let mut msg = vec![ClientPacketType::Chat as u8];
         msg.extend_from_slice(self.input.as_bytes());
 
         if let Some(socket) = &self.socket {
@@ -1698,17 +1668,5 @@ impl GuiClientApp {
         }
 
         self.input.clear();
-    }
-
-    fn set_nick(&mut self) {
-        let mut nick = vec![0x04];
-        nick.extend_from_slice(self.nick.as_bytes());
-
-        let client = match &self.client {
-            Some(client) => client.lock().unwrap(),
-            None => return,
-        };
-
-        client.send(&nick);
     }
 }

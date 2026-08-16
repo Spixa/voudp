@@ -46,7 +46,6 @@ pub struct ClientState {
     muted: Arc<AtomicBool>,
     deafened: Arc<AtomicBool>,
     connected: Arc<AtomicBool>,
-    channel_id: Arc<Mutex<u32>>,
     pub list: SafeChannelList,
     pub talking: Arc<AtomicBool>,
     pub ping: Arc<AtomicU16>,
@@ -68,7 +67,6 @@ pub enum Message {
     Renick(String, String),
     Broadcast(String, String),
     Kick(String),
-    MaskFailed,
 }
 
 pub struct GlobalListState {
@@ -81,7 +79,12 @@ type SafeChannelList = Arc<Mutex<GlobalListState>>;
 type SafeCommandList = Arc<Mutex<Vec<ServerCommand>>>;
 
 impl ClientState {
-    pub fn new(ip: &str, channel_id: u32, phrase: &[u8]) -> Result<Self, io::Error> {
+    pub fn new(
+        ip: &str,
+        phrase: &[u8],
+        username: String,
+        password: String,
+    ) -> Result<Self, io::Error> {
         let key = socket::derive_psk_from_phrase(phrase, protocol::VOUDP_SALT);
         let socket = SecureUdpSocket::create("0.0.0.0:0".into(), key)?; // let OS decide port
 
@@ -95,7 +98,7 @@ impl ClientState {
                 io::ErrorKind::InvalidInput,
                 "bad server adress",
             ))?;
-        let handshake = ClientHandshake::new(addr, "spixa".into(), "password".into());
+        let handshake = ClientHandshake::new(addr, username, password);
         let handshake = Arc::new(Mutex::new(handshake));
 
         Ok(Self {
@@ -103,7 +106,6 @@ impl ClientState {
             muted: Arc::new(AtomicBool::new(false)),
             deafened: Arc::new(AtomicBool::new(false)),
             connected: Arc::new(AtomicBool::new(true)),
-            channel_id: Arc::new(Mutex::new(channel_id)),
             list: Arc::new(Mutex::new(GlobalListState {
                 channels: vec![],
                 last_updated: Instant::now(),
@@ -120,10 +122,11 @@ impl ClientState {
         })
     }
 
-    pub fn join(&self) -> Result<(), std::io::Error> {
-        let mut handshake = self.handshake.lock().unwrap();
+    pub fn join(&self, id: u32) -> Result<usize, std::io::Error> {
+        let mut packet = vec![ClientPacketType::JoinChannel as u8];
+        packet.extend_from_slice(&id.to_be_bytes());
 
-        handshake.start(&self.socket)
+        self.socket.send(&packet)
     }
 
     pub fn run(&mut self, mode: Mode) -> Result<()> {
@@ -144,7 +147,6 @@ impl ClientState {
         self.rx = Some(rx);
         match mode {
             Mode::Repl => {
-                self.join()?;
                 Self::start_audio(
                     socket,
                     muted,
@@ -163,7 +165,6 @@ impl ClientState {
                 )?;
             }
             Mode::Gui => {
-                self.join()?;
                 thread::spawn(move || {
                     if let Err(e) = Self::start_audio(
                         socket, muted, deafened, connected, state, list, cmd_list, tx, mode,
@@ -423,6 +424,11 @@ impl ClientState {
         let mut expected_tick: Option<u32> = None;
         const MAX_JITTER_FRAMES: usize = 50;
 
+        {
+            let mut handshake = handshake.lock().unwrap();
+            let _ = handshake.start(&socket);
+        }
+
         loop {
             if !connected.load(Ordering::Relaxed) {
                 break;
@@ -475,6 +481,13 @@ impl ClientState {
 
                         if let Err(e) = handshake.process(&socket, &recv_buf[1..size], &pin) {
                             eprintln!("Handshake process ran into a problem: {e}");
+                        }
+
+                        if handshake.is_done() {
+                            let mut packet = vec![ClientPacketType::JoinChannel as u8];
+                            packet.extend_from_slice(&1u32.to_be_bytes());
+
+                            let _ = socket.send(&packet);
                         }
                     }
                     Ok(Cpt::Audio) => {
@@ -580,7 +593,10 @@ impl ClientState {
 
                         let _ = tx.send((Message::Kick(reason.clone()), Local::now()));
                     }
-                    Ok(Cpt::Mask) | Ok(Cpt::Ctrl) | Ok(Cpt::RegisterConsole) => {}
+                    Ok(Cpt::Mask)
+                    | Ok(Cpt::Ctrl)
+                    | Ok(Cpt::RegisterConsole)
+                    | Ok(Cpt::JoinChannel) => {}
                     Ok(Cpt::ForceAudio) => {
                         if let Ok(action) = ForceAudio::deserialize(&recv_buf[1..size]) {
                             match action.force_type {
@@ -595,10 +611,6 @@ impl ClientState {
                     }
                     Ok(Cpt::Vivian) => {
                         glitter.store(true, Ordering::Relaxed);
-                    }
-                    Ok(Cpt::MaskFailed) => {
-                        println!("ayo");
-                        let _ = tx.send((Message::MaskFailed, Local::now()));
                     }
                     Err(_) => {}
                 },
