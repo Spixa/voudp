@@ -23,8 +23,12 @@ use x25519_dalek::{EphemeralSecret, PublicKey};
 use crate::{
     commands::CommandSystem,
     console_cmd::{ConsoleCommandResult, handle_command},
-    db::{self, LookupResult},
-    handshake::{HandshakeMessage, HandshakeStep, RemoteSessionState},
+    db,
+    handshake::{
+        HandshakeMessage,
+        HandshakeStep::{self},
+        RegisterMessage, RemoteSessionState, register_user, slow_hash,
+    },
     mixer,
     plugin::{PluginAction, PluginManager},
     protocol::{
@@ -348,6 +352,9 @@ impl ServerState {
         let key = socket::derive_psk_from_phrase(phrase, protocol::VOUDP_SALT);
         let socket = SecureUdpSocket::create(format!("0.0.0.0:{}", config.bind_port), key)?;
 
+        register_user("spixa", b"1937")?;
+        register_user("music", b"music_password")?;
+
         info!("Bound to 0.0.0.0:{}", config.bind_port);
         info!(
             "There are {} free buffers (max remotes that can connect)",
@@ -603,7 +610,98 @@ impl ServerState {
         self.socket.send_reliable(packet, addr)
     }
 
+    fn send_register(&self, addr: SocketAddr, msg: &RegisterMessage) -> io::Result<()> {
+        let mut packet = vec![ClientPacketType::Handshake as u8];
+        packet.extend_from_slice(&msg.encode());
+        self.socket.send_reliable(packet, addr)
+    }
+
+    fn handle_register(&mut self, addr: SocketAddr, data: &[u8]) {
+        let req = match RegisterMessage::decode(data) {
+            Ok(r) => r,
+            Err(e) => {
+                warn!("malformed registration from {addr}: {e}");
+                return;
+            }
+        };
+
+        let RegisterMessage::Request {
+            session_id,
+            c_nonce,
+            username,
+            password,
+        } = req
+        else {
+            warn!("bad register request from {addr}");
+            return;
+        };
+
+        let username_str = String::from_utf8_lossy(&username)
+            .trim_end_matches('\0')
+            .to_string();
+
+        if db::user_exists(&username_str) {
+            warn!("User {} already exists!", username_str);
+
+            let _ = self.send_register(addr, &RegisterMessage::AlreadyExists);
+            return;
+        }
+
+        let salt = rand::random::<[u8; 16]>();
+        let hash = slow_hash(&password, &salt);
+
+        if let Err(e) = db::create_user(&username_str, &salt, &hash) {
+            error!("failed to store user {}: {}", username_str, e);
+            return;
+        }
+
+        let s_nonce = rand::random::<[u8; 32]>();
+        let msg_to_sign = [
+            c_nonce.as_ref(),
+            s_nonce.as_ref(),
+            salt.as_ref(),
+            b"OK".as_ref(),
+        ]
+        .concat();
+        let signature = self.signing_key.sign(&msg_to_sign);
+
+        let confirmation = sha256(
+            &[
+                c_nonce.as_ref(),
+                s_nonce.as_ref(),
+                salt.as_ref(),
+                b"OK".as_ref(),
+            ]
+            .concat(),
+        );
+
+        let server_pub_bytes = self.signing_key.verifying_key().to_bytes();
+
+        let resp = RegisterMessage::Response {
+            session_id,
+            s_nonce,
+            salt,
+            server_pub_bytes,
+            confirmation,
+            signature: signature.to_bytes(),
+        };
+
+        if let Err(e) = self.send_register(addr, &resp) {
+            println!("failed to send register to {addr}: {e}");
+        }
+        info!("{username_str} registered successfully! ");
+    }
+
     fn handle_handshake(&mut self, addr: SocketAddr, data: &[u8]) {
+        if data.len() < 1 {
+            return;
+        }
+
+        if data[0] == HandshakeStep::RegisterRequest as u8 {
+            self.handle_register(addr, data);
+            return;
+        }
+
         let msg = match HandshakeMessage::decode(data) {
             Ok(m) => m,
             Err(e) => {
@@ -616,14 +714,33 @@ impl ServerState {
             HandshakeMessage::ClientHello {
                 session_id,
                 c_nonce,
+                username,
             } => {
+                let username_str = String::from_utf8_lossy(&username)
+                    .trim_end_matches('\0')
+                    .to_string();
+
+                let salt = match db::get_user_salt(&username_str) {
+                    Some(s) => s,
+                    None => {
+                        warn!("User {} not found", username_str);
+                        return;
+                    }
+                };
+
                 let s_nonce = rand::random::<[u8; 32]>();
 
                 // generate eph keypair
                 let eph_secret = EphemeralSecret::random();
                 let e_pub_s = PublicKey::from(&eph_secret).to_bytes();
 
-                let msg_to_sign = [c_nonce.as_ref(), s_nonce.as_ref(), e_pub_s.as_ref()].concat();
+                let msg_to_sign = [
+                    c_nonce.as_ref(),
+                    s_nonce.as_ref(),
+                    e_pub_s.as_ref(),
+                    salt.as_ref(),
+                ]
+                .concat();
                 let signature = self.signing_key.sign(&msg_to_sign);
 
                 let server_pub_bytes = self.signing_key.verifying_key().to_bytes();
@@ -632,6 +749,7 @@ impl ServerState {
                     s_nonce,
                     e_pub_s,
                     server_pub_bytes,
+                    salt,
                     signature: signature.to_bytes(),
                 };
                 let _ = self.send_handshake(addr, &reply);
@@ -641,6 +759,7 @@ impl ServerState {
                     step: HandshakeStep::ServerHello,
                     session_id,
                     c_nonce,
+                    username: username_str,
                     s_nonce,
                     eph_secret: Some(eph_secret),
                     client_addr: addr,
@@ -655,7 +774,6 @@ impl ServerState {
             HandshakeMessage::ClientCreds {
                 session_id,
                 e_pub_c,
-                username,
                 challenge_response,
             } => {
                 let mut map = self.unauths.lock().unwrap();
@@ -690,21 +808,12 @@ impl ServerState {
                         &state.s_nonce,
                     );
 
-                    let username = if let Ok(username) = String::from_utf8(username.to_vec()) {
-                        username
-                    } else {
-                        warn!("invalid username string received from {addr}");
-                        return;
-                    };
+                    let username = state.username.clone();
 
-                    let stored_hash = match db::lookup_password(&username) {
-                        LookupResult::Correct(hash) => hash,
-                        LookupResult::MalformedHex => {
-                            warn!("bad hex stored for {username}");
-                            return;
-                        }
-                        LookupResult::OsError => {
-                            warn!("os error when trying to read db/{username}.sha");
+                    let stored_hash = match db::lookup_password_hash(&username) {
+                        Some(h) => h,
+                        None => {
+                            warn!("no hash for user");
                             return;
                         }
                     };
@@ -725,7 +834,7 @@ impl ServerState {
 
                     map.remove(&addr);
 
-                    println!("{username} is now authenticated!");
+                    println!("{} is now authenticated!", username);
 
                     self.remotes.insert(
                         addr,

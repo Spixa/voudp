@@ -24,6 +24,7 @@ hkdf = "0.12.4"
 hmac = "0.12.1"
 base64 = "0.22"
 hex = "0.4.3"
+argon2 = { version = "0.5", features = ["std"] }
 
 # platform-specific dependencies (optional, for more control)
 [target.'cfg(windows)'.dependencies]

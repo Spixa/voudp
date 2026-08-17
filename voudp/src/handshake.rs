@@ -3,20 +3,36 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use chacha20poly1305::Key;
-use ed25519_dalek::{Signature, Verifier};
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use x25519_dalek::{EphemeralSecret, PublicKey};
 
+use crate::db;
 use crate::protocol::ClientPacketType;
 use crate::socket::{SecureUdpSocket, derive_session_key};
 use crate::util::sha256;
 
+pub fn register_user(username: &str, password: &[u8]) -> io::Result<()> {
+    let salt = rand::random::<[u8; 16]>();
+    let hash = slow_hash(password, &salt);
+
+    db::create_user(&username, &salt, &hash)
+}
+
 #[repr(u8)]
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum HandshakeStep {
+    // login
     ClientHello = 0x01,
     ServerHello = 0x02,
     ClientCredentials = 0x05,
     ServerConfirm = 0x07,
+
+    // register
+    RegisterRequest = 0x03,
+    RegisterResponse = 0x04,
+
+    // HandshakeFail = 0xfe,
+    RegisterFail = 0xff,
     Done = 0x00,
 }
 
@@ -29,6 +45,9 @@ impl TryFrom<u8> for HandshakeStep {
             0x02 => Ok(Self::ServerHello),
             0x05 => Ok(Self::ClientCredentials),
             0x07 => Ok(Self::ServerConfirm),
+            0x03 => Ok(Self::RegisterRequest),
+            0x04 => Ok(Self::RegisterResponse),
+            0xff => Ok(Self::RegisterFail),
             0x00 => Ok(Self::Done),
             _ => Err(value),
         }
@@ -40,18 +59,19 @@ pub enum HandshakeMessage {
     ClientHello {
         session_id: [u8; 16],
         c_nonce: [u8; 32],
+        username: [u8; 32],
     },
     ServerHello {
         session_id: [u8; 16],
         s_nonce: [u8; 32],
         e_pub_s: [u8; 32],
+        salt: [u8; 16],
         server_pub_bytes: [u8; 32],
         signature: [u8; 64],
     },
     ClientCreds {
         session_id: [u8; 16],
         e_pub_c: [u8; 32],
-        username: [u8; 32],
         challenge_response: [u8; 32],
     },
     ServerConfirm {
@@ -60,15 +80,144 @@ pub enum HandshakeMessage {
     },
 }
 
+#[derive(Debug)]
+pub enum RegisterMessage {
+    Request {
+        session_id: [u8; 16],
+        c_nonce: [u8; 32],
+        username: [u8; 32],
+        password: Vec<u8>,
+    },
+    Response {
+        session_id: [u8; 16],
+        s_nonce: [u8; 32],
+        salt: [u8; 16],
+        server_pub_bytes: [u8; 32],
+        confirmation: [u8; 32],
+        signature: [u8; 64],
+    },
+    AlreadyExists,
+}
+
 pub const STEP_CLIENT_HELLO: u8 = 1;
 pub const STEP_SERVER_HELLO: u8 = 2;
 pub const STEP_CLIENT_CREDS: u8 = 5;
 pub const STEP_SERVER_CONFIRM: u8 = 7;
 
-pub const CLIENT_HELLO_SIZE: usize = 1 + 16 + 32; // step + session_id + c_nonce
-pub const SERVER_HELLO_SIZE: usize = 1 + 16 + 32 + 32 + 32 + 64; // step + sid + s_nonce + e_pub_s + pub + sig
-pub const CLIENT_CREDS_SIZE: usize = 1 + 16 + 32 + 32 + 32; // step + sid + e_pub_c + username + challenge_response
+pub const STEP_REGISTER_REQUEST: u8 = 3;
+pub const STEP_REGISTER_RESPONSE: u8 = 4;
+
+pub const REGISTER_FAILED: u8 = 0xff;
+
+pub const CLIENT_HELLO_SIZE: usize = 1 + 16 + 32 + 32; // step + session_id + c_nonce + username
+pub const SERVER_HELLO_SIZE: usize = 1 + 16 + 32 + 32 + 16 + 32 + 64; // step + sid + s_nonce + e_pub_s + salt + pub + sig
+pub const CLIENT_CREDS_SIZE: usize = 1 + 16 + 32 + 32; // step + sid + e_pub_c + challenge_response
 pub const SERVER_CONFIRM_SIZE: usize = 1 + 16 + 32; // step + sid + confirmation
+pub const REGISTER_REQUEST_MIN_SIZE: usize = 1 + 16 + 32 + 32; // step + sid + c_nonce + username + ... [password]
+pub const REGISTER_RESPONSE_SIZE: usize = 1 + 16 + 32 + 16 + 32 + 32 + 64; // step + sid + s_nonce + salt + server_pub + confirmation + signature 
+
+impl RegisterMessage {
+    pub fn encode(&self) -> Vec<u8> {
+        match self {
+            RegisterMessage::Request {
+                session_id,
+                c_nonce,
+                username,
+                password,
+            } => {
+                let mut buf = Vec::with_capacity(REGISTER_REQUEST_MIN_SIZE + password.len());
+                buf.push(STEP_REGISTER_REQUEST);
+                buf.extend_from_slice(session_id);
+                buf.extend_from_slice(c_nonce);
+                buf.extend_from_slice(username);
+                buf.extend_from_slice(password);
+                buf
+            }
+            RegisterMessage::Response {
+                session_id,
+                s_nonce,
+                salt,
+                server_pub_bytes,
+                confirmation,
+                signature,
+            } => {
+                let mut buf = Vec::with_capacity(REGISTER_RESPONSE_SIZE);
+                buf.push(STEP_REGISTER_RESPONSE);
+                buf.extend_from_slice(session_id);
+                buf.extend_from_slice(s_nonce);
+                buf.extend_from_slice(salt);
+                buf.extend_from_slice(server_pub_bytes);
+                buf.extend_from_slice(confirmation);
+                buf.extend_from_slice(signature);
+                buf
+            }
+            RegisterMessage::AlreadyExists => vec![REGISTER_FAILED],
+        }
+    }
+
+    pub fn decode(data: &[u8]) -> Result<Self, &'static str> {
+        if data.is_empty() {
+            return Err("empty packet");
+        }
+
+        let step = data[0];
+        let payload = &data[1..];
+
+        match step {
+            STEP_REGISTER_REQUEST => {
+                if payload.len() < 16 + 32 + 32 {
+                    return Err("invalid RegisterRequest size");
+                }
+
+                let (sid, rest) = payload.split_at(16);
+                let (c_nonce, rest) = rest.split_at(32);
+                let (username, password) = rest.split_at(32);
+
+                let session_id: [u8; 16] = sid.try_into().unwrap();
+                let c_nonce: [u8; 32] = c_nonce.try_into().unwrap();
+                let username: [u8; 32] = username.try_into().unwrap();
+
+                let password = password.to_vec();
+
+                Ok(RegisterMessage::Request {
+                    session_id,
+                    c_nonce,
+                    username,
+                    password,
+                })
+            }
+            STEP_REGISTER_RESPONSE => {
+                if payload.len() != 16 + 32 + 16 + 32 + 32 + 64 {
+                    return Err("invalid RegisterResponse size");
+                }
+
+                let (sid, rest) = payload.split_at(16);
+                let (s_nonce, rest) = rest.split_at(32);
+                let (salt, rest) = rest.split_at(16);
+                let (server_pub_bytes, rest) = rest.split_at(32);
+                let (confirmation, signature) = rest.split_at(32);
+
+                let session_id: [u8; 16] = sid.try_into().unwrap();
+                let s_nonce: [u8; 32] = s_nonce.try_into().unwrap();
+                let salt: [u8; 16] = salt.try_into().unwrap();
+                let server_pub_bytes = server_pub_bytes.try_into().unwrap();
+                let confirmation: [u8; 32] = confirmation.try_into().unwrap();
+                let signature: [u8; 64] = signature.try_into().unwrap();
+
+                Ok(RegisterMessage::Response {
+                    session_id,
+                    s_nonce,
+                    salt,
+                    server_pub_bytes,
+                    confirmation,
+                    signature,
+                })
+            }
+            REGISTER_FAILED => Ok(RegisterMessage::AlreadyExists),
+            _ => Err("Not a register packet"),
+        }
+    }
+}
 
 impl HandshakeMessage {
     pub fn encode(&self) -> Vec<u8> {
@@ -76,11 +225,13 @@ impl HandshakeMessage {
             HandshakeMessage::ClientHello {
                 session_id,
                 c_nonce,
+                username,
             } => {
                 let mut buf = Vec::with_capacity(CLIENT_HELLO_SIZE);
                 buf.push(STEP_CLIENT_HELLO);
                 buf.extend_from_slice(session_id);
                 buf.extend_from_slice(c_nonce);
+                buf.extend_from_slice(username);
                 buf
             }
             HandshakeMessage::ServerHello {
@@ -88,6 +239,7 @@ impl HandshakeMessage {
                 s_nonce,
                 server_pub_bytes,
                 signature,
+                salt,
                 e_pub_s,
             } => {
                 let mut buf = Vec::with_capacity(SERVER_HELLO_SIZE);
@@ -95,13 +247,13 @@ impl HandshakeMessage {
                 buf.extend_from_slice(session_id);
                 buf.extend_from_slice(s_nonce);
                 buf.extend_from_slice(e_pub_s);
+                buf.extend_from_slice(salt);
                 buf.extend_from_slice(server_pub_bytes);
                 buf.extend_from_slice(signature);
                 buf
             }
             HandshakeMessage::ClientCreds {
                 session_id,
-                username,
                 challenge_response,
                 e_pub_c,
             } => {
@@ -109,7 +261,6 @@ impl HandshakeMessage {
                 buf.push(STEP_CLIENT_CREDS);
                 buf.extend_from_slice(session_id);
                 buf.extend_from_slice(e_pub_c);
-                buf.extend_from_slice(username);
                 buf.extend_from_slice(challenge_response);
                 buf
             }
@@ -136,23 +287,25 @@ impl HandshakeMessage {
 
         match step {
             STEP_CLIENT_HELLO => {
-                if payload.len() != 16 + 32 {
+                if payload.len() != 16 + 32 + 32 {
                     return Err("invalid ClientHello size");
                 }
 
                 let (sid, rest) = payload.split_at(16);
-                let (c_nonce, _) = rest.split_at(32);
+                let (c_nonce, username) = rest.split_at(32);
 
                 let session_id: [u8; 16] = sid.try_into().unwrap();
                 let c_nonce: [u8; 32] = c_nonce.try_into().unwrap();
+                let username: [u8; 32] = username.try_into().unwrap();
 
                 Ok(HandshakeMessage::ClientHello {
                     session_id,
                     c_nonce,
+                    username,
                 })
             }
             STEP_SERVER_HELLO => {
-                if payload.len() != 16 + 32 + 32 + 32 + 64 {
+                if payload.len() != 16 + 32 + 32 + 32 + 16 + 64 {
                     println!("got {} instead of {}", payload.len(), 16 + 32 + 32 + 64);
                     return Err("invalid ServerHello size");
                 }
@@ -160,11 +313,13 @@ impl HandshakeMessage {
                 let (sid, rest) = payload.split_at(16);
                 let (s_nonce, rest) = rest.split_at(32);
                 let (e_pub_s, rest) = rest.split_at(32);
+                let (salt, rest) = rest.split_at(16);
                 let (pub_bytes, sig) = rest.split_at(32);
 
                 let session_id: [u8; 16] = sid.try_into().unwrap();
                 let s_nonce: [u8; 32] = s_nonce.try_into().unwrap();
                 let e_pub_s: [u8; 32] = e_pub_s.try_into().unwrap();
+                let salt: [u8; 16] = salt.try_into().unwrap();
                 let server_pub_bytes: [u8; 32] = pub_bytes.try_into().unwrap();
                 let signature: [u8; 64] = sig.try_into().unwrap();
 
@@ -172,29 +327,27 @@ impl HandshakeMessage {
                     session_id,
                     s_nonce,
                     e_pub_s,
+                    salt,
                     server_pub_bytes,
                     signature,
                 })
             }
             STEP_CLIENT_CREDS => {
-                if payload.len() != 16 + 32 + 32 + 32 {
+                if payload.len() != 16 + 32 + 32 {
                     return Err("invalid ClientCreds size");
                 }
 
                 let (sid, rest) = payload.split_at(16);
                 let (e_pub_c, rest) = rest.split_at(32);
-                let (username_bytes, rest) = rest.split_at(32);
                 let (challenge_response, _) = rest.split_at(32);
 
                 let session_id: [u8; 16] = sid.try_into().unwrap();
                 let e_pub_c: [u8; 32] = e_pub_c.try_into().unwrap();
-                let username: [u8; 32] = username_bytes.try_into().unwrap();
                 let challenge_response: [u8; 32] = challenge_response.try_into().unwrap();
 
                 Ok(HandshakeMessage::ClientCreds {
                     session_id,
                     e_pub_c,
-                    username,
                     challenge_response,
                 })
             }
@@ -224,6 +377,7 @@ pub struct RemoteSessionState {
     pub session_id: [u8; 16],
     pub c_nonce: [u8; 32],
     pub s_nonce: [u8; 32],
+    pub username: String,
     pub eph_secret: Option<EphemeralSecret>,
     pub client_addr: SocketAddr,
     pub created: Instant,
@@ -233,6 +387,23 @@ impl RemoteSessionState {
     pub fn is_expired(&self) -> bool {
         self.created.elapsed() > Duration::from_secs(10)
     }
+}
+
+use argon2::{Algorithm, Argon2, ParamsBuilder, Version};
+
+pub fn slow_hash(password: &[u8], salt: &[u8; 16]) -> [u8; 32] {
+    let params = ParamsBuilder::new()
+        .m_cost(4096) // 4 MiB
+        .output_len(32)
+        .build()
+        .unwrap();
+
+    let argon2 = Argon2::new(Algorithm::Argon2id, Version::V0x13, params);
+    let mut output = [0u8; 32];
+    argon2
+        .hash_password_into(password, salt, &mut output)
+        .unwrap();
+    output
 }
 
 pub struct ClientHandshake {
@@ -270,6 +441,106 @@ impl ClientHandshake {
         }
     }
 
+    pub fn register_handshake(
+        &mut self,
+        socket: &SecureUdpSocket,
+        username: &str,
+        password: &str,
+        trusted_pin: &[u8; 32],
+    ) -> io::Result<()> {
+        let session_id_local = rand::random();
+        let c_nonce_local = rand::random();
+
+        let mut uname_arr = [0u8; 32];
+        let bytes = username.as_bytes();
+        let len = bytes.len().min(32);
+        uname_arr[..len].copy_from_slice(&bytes[..len]);
+
+        let req: RegisterMessage = RegisterMessage::Request {
+            session_id: session_id_local,
+            c_nonce: c_nonce_local,
+            username: uname_arr,
+            password: password.as_bytes().to_vec(),
+        };
+        self.send(&req.encode(), socket)?;
+
+        let mut buf = [0u8; 2048];
+        let len;
+        loop {
+            match socket.recv_from(&mut buf) {
+                Ok((l, _)) => {
+                    if l != 0 {
+                        len = l;
+                        break;
+                    }
+                }
+                Err((e, _)) if e.kind() == io::ErrorKind::WouldBlock => {}
+                Err((e, _)) => return Err(e),
+            }
+        }
+        let resp = RegisterMessage::decode(&buf[1..len]).map_err(|e| io::Error::other(e))?;
+
+        match resp {
+            RegisterMessage::Response {
+                session_id,
+                s_nonce,
+                salt,
+                server_pub_bytes,
+                confirmation,
+                signature,
+            } => {
+                if session_id != session_id_local {
+                    return Err(io::Error::other("sesion_id mistmatch"));
+                }
+
+                let actual_hash = sha256(&server_pub_bytes);
+                if actual_hash != *trusted_pin {
+                    return Err(io::Error::new(
+                        io::ErrorKind::PermissionDenied,
+                        "server public key pin mismatch",
+                    ));
+                }
+
+                let verify_key =
+                    VerifyingKey::from_bytes(&server_pub_bytes).map_err(|e| io::Error::other(e))?;
+                let msg_to_verify = [
+                    c_nonce_local.as_ref(),
+                    s_nonce.as_ref(),
+                    salt.as_ref(),
+                    b"OK".as_ref(),
+                ]
+                .concat();
+                verify_key
+                    .verify(&msg_to_verify, &Signature::from_bytes(&signature))
+                    .map_err(|e| io::Error::other(e))?;
+
+                let expected = sha256(
+                    &[
+                        c_nonce_local.as_ref(),
+                        s_nonce.as_ref(),
+                        salt.as_ref(),
+                        b"OK",
+                    ]
+                    .concat(),
+                );
+                if confirmation != expected {
+                    return Err(io::Error::other("confirmation mismatch"));
+                }
+
+                println!("[voudp tls] registered successfully");
+                println!("[voudp tls] salt: {:02x?}", salt);
+                Ok(())
+            }
+            RegisterMessage::AlreadyExists => {
+                eprintln!("[voudp tls] FAIL user already exists and cannot be registered");
+                Err(io::Error::other(
+                    "As it turns out, that user is already in the database",
+                ))
+            }
+            _ => return Err(io::Error::other("invalid register message")),
+        }
+    }
+
     pub fn start(&mut self, socket: &SecureUdpSocket) -> io::Result<()> {
         if self.step != HandshakeStep::ClientHello {
             return Err(io::Error::new(
@@ -294,9 +565,15 @@ impl ClientHandshake {
         self.e_pub_c = e_pub_c.to_bytes();
         self.eph_secret = Some(client_eph); // store for later ECDH
 
+        let mut uname_arr = [0u8; 32];
+        let bytes = self.username.as_bytes();
+        let len = bytes.len().min(32);
+        uname_arr[..len].copy_from_slice(&bytes[..len]);
+
         let hello = HandshakeMessage::ClientHello {
             session_id: self.session_id,
             c_nonce: self.c_nonce,
+            username: uname_arr,
         };
 
         self.send(&hello.encode(), socket)?;
@@ -330,6 +607,7 @@ impl ClientHandshake {
                     session_id,
                     s_nonce,
                     server_pub_bytes,
+                    salt,
                     signature,
                     e_pub_s,
                 },
@@ -361,8 +639,13 @@ impl ClientHandshake {
                 let verify_key = VerifyingKey::from_bytes(&server_pub_bytes).map_err(|_| {
                     io::Error::new(io::ErrorKind::InvalidData, "invalid server pub key")
                 })?;
-                let msg_to_verify =
-                    [self.c_nonce.as_ref(), s_nonce.as_ref(), e_pub_s.as_ref()].concat();
+                let msg_to_verify = [
+                    self.c_nonce.as_ref(),
+                    s_nonce.as_ref(),
+                    e_pub_s.as_ref(),
+                    salt.as_ref(),
+                ]
+                .concat();
                 verify_key
                     .verify(&msg_to_verify, &Signature::from_bytes(&signature))
                     .map_err(|_| {
@@ -376,20 +659,13 @@ impl ClientHandshake {
                 self.server_pub_bytes = server_pub_bytes;
                 self.e_pub_s = e_pub_s;
 
-                let challenge =
-                    sha256(&[s_nonce.as_ref(), &sha256(self.password.as_bytes())].concat());
+                let pw_hash = slow_hash(self.password.as_bytes(), &salt);
 
-                let mut uname_arr = [0u8; 32];
-                {
-                    let bytes = self.username.as_bytes();
-                    let len = bytes.len().min(32);
-                    uname_arr[..len].copy_from_slice(&bytes[..len]);
-                }
+                let challenge = sha256(&[s_nonce.as_ref(), pw_hash.as_ref()].concat());
 
                 let creds = HandshakeMessage::ClientCreds {
                     session_id: self.session_id,
                     challenge_response: challenge,
-                    username: uname_arr,
                     e_pub_c: self.e_pub_c,
                 };
 

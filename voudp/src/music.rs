@@ -1,6 +1,7 @@
 use std::{
     fs::File,
-    io::{ErrorKind, Read},
+    io::{self, ErrorKind, Read},
+    net::ToSocketAddrs,
     path::Path,
     sync::{
         Arc, Mutex,
@@ -11,6 +12,7 @@ use std::{
 };
 
 use anyhow::{Context, Result, anyhow};
+use ed25519_dalek::{VerifyingKey, pkcs8::DecodePublicKey};
 use opus2::{Bitrate, Encoder};
 use symphonia::{
     core::{
@@ -26,9 +28,10 @@ use symphonia::{
 };
 
 use crate::{
-    protocol::{self, ClientPacketType, FromPacket, ToBytes},
+    handshake::ClientHandshake,
+    protocol::{self, ClientPacketType, FromPacket},
     socket::{self, SecureUdpSocket},
-    util::{ChatPacket, FlowPacket},
+    util::{ChatPacket, FlowPacket, sha256},
 };
 
 const TARGET_SAMPLE_RATE: u32 = 48_000;
@@ -43,6 +46,7 @@ pub struct MusicClientState {
     current: Arc<Mutex<String>>,
     connected: Arc<AtomicBool>,
     channel_id: u32,
+    handshake: ClientHandshake,
 }
 
 impl MusicClientState {
@@ -51,6 +55,15 @@ impl MusicClientState {
         let socket = SecureUdpSocket::create("0.0.0.0:0".into(), key)?;
         socket.connect(addr)?;
 
+        let addr = addr
+            .to_socket_addrs()?
+            .into_iter()
+            .find(|a| a.is_ipv4())
+            .ok_or(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "bad server adress",
+            ))?;
+
         Ok(Self {
             first: true,
             socket,
@@ -58,21 +71,48 @@ impl MusicClientState {
             current: Arc::new(Mutex::new(String::from("Nothing"))),
             connected: Arc::new(AtomicBool::new(true)),
             channel_id,
+            handshake: ClientHandshake::new(addr, "music".into(), "music_password".into()),
         })
+    }
+
+    fn load_pinned_public_key_from_pem(pem_path: &str) -> io::Result<[u8; 32]> {
+        let pem = std::fs::read_to_string(pem_path)?;
+        let verifying_key = VerifyingKey::from_public_key_pem(&pem)
+            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+        Ok(verifying_key.to_bytes())
+    }
+
+    fn do_handshake(&mut self) -> Result<()> {
+        self.handshake.start(&self.socket)?;
+        let trusted_pin = sha256(&Self::load_pinned_public_key_from_pem("server_public.pem")?);
+
+        while !self.handshake.is_done() {
+            let mut recv_buf = [0u8; 2048];
+            match self.socket.recv_from(&mut recv_buf) {
+                Ok((size, _)) => {
+                    if size > 1 && recv_buf[0] == ClientPacketType::Handshake as u8 {
+                        self.handshake
+                            .process(&self.socket, &recv_buf[1..size], &trusted_pin)?;
+                    }
+                }
+                Err(e) if e.0.kind() == ErrorKind::WouldBlock => {
+                    thread::sleep(Duration::from_micros(100));
+                }
+                Err(_) => {}
+            }
+            thread::sleep(Duration::from_micros(100));
+        }
+
+        let mut packet = vec![ClientPacketType::JoinChannel as u8];
+        packet.extend_from_slice(&2u32.to_be_bytes());
+        self.socket.send(&packet)?;
+
+        Ok(())
     }
 
     pub fn run(&mut self, path: String) -> Result<()> {
         if self.first {
-            // TODO: fix handshake
-            // let mut join_packet = ClientPacketType::Join.to_bytes();
-            // join_packet.extend_from_slice(&(1u32).to_be_bytes());
-            // self.socket.send(&join_packet)?;
-
-            // if self.channel_id != 1 {
-            //     let mut join_packet = ClientPacketType::Join.to_bytes();
-            //     join_packet.extend_from_slice(&self.channel_id.to_be_bytes());
-            //     self.socket.send(&join_packet)?;
-            // }
+            self.do_handshake()?;
         }
 
         self.first = false;
@@ -187,16 +227,11 @@ impl MusicClientState {
                         }
                     });
 
-                    for (_num, entry) in dir.enumerate() {
+                    for (_, entry) in dir.enumerate() {
                         match entry {
                             Ok(entry) => {
                                 if entry.file_type().unwrap().is_file() {
                                     let p = entry.file_name().to_str().unwrap().to_string();
-                                    let mut nick_packet = vec![0x04];
-                                    nick_packet.extend_from_slice("music_player".as_bytes());
-
-                                    *self.current.lock().unwrap() = p.clone();
-                                    let _ = self.socket.send(&nick_packet);
 
                                     let mut msg_packet = vec![0x06];
                                     msg_packet.extend_from_slice(

@@ -6,7 +6,7 @@ use ed25519_dalek::pkcs8::DecodePublicKey;
 use opus2::{Application, Channels, Decoder, Encoder};
 use std::collections::{BTreeMap, VecDeque};
 use std::io;
-use std::net::{SocketAddr, ToSocketAddrs};
+use std::net::ToSocketAddrs;
 use std::sync::atomic::{AtomicBool, AtomicU16, Ordering};
 use std::sync::mpsc::{self, Receiver, Sender};
 use std::sync::{Arc, Mutex};
@@ -178,6 +178,16 @@ impl ClientState {
         }
 
         Ok(())
+    }
+
+    pub fn register(&self, username: &String, password: &String) {
+        let pub_bytes = Self::load_pinned_public_key_from_pem("server_public.pem").unwrap();
+        let pin = sha256(&pub_bytes);
+
+        let mut handshake = self.handshake.lock().unwrap();
+        if let Err(e) = handshake.register_handshake(&self.socket, username, password, &pin) {
+            eprintln!("{}", e);
+        }
     }
 
     fn start_audio(
@@ -424,6 +434,9 @@ impl ClientState {
         let mut expected_tick: Option<u32> = None;
         const MAX_JITTER_FRAMES: usize = 50;
 
+        let pub_bytes = Self::load_pinned_public_key_from_pem("server_public.pem").unwrap();
+        let pin = sha256(&pub_bytes);
+
         {
             let mut handshake = handshake.lock().unwrap();
             let _ = handshake.start(&socket);
@@ -474,11 +487,6 @@ impl ClientState {
                 Ok((size, _)) if size > 1 => match Cpt::try_from(recv_buf[0]) {
                     Ok(Cpt::Handshake) => {
                         let mut handshake = handshake.lock().unwrap();
-
-                        let pub_bytes =
-                            Self::load_pinned_public_key_from_pem("server_public.pem").unwrap();
-                        let pin = sha256(&pub_bytes);
-
                         if let Err(e) = handshake.process(&socket, &recv_buf[1..size], &pin) {
                             eprintln!("Handshake process ran into a problem: {e}");
                         }

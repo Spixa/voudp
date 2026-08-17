@@ -344,7 +344,12 @@ impl eframe::App for GuiClientApp {
 
                                 ui.separator();
                                 ui.add_space(6.0);
-                                ui.label(RichText::new("Authentication (v0.5+)").size(14.0).weak().color(Color32::from_gray(180)));
+                                ui.label(
+                                    RichText::new("Authentication (v0.5+)")
+                                        .size(14.0)
+                                        .weak()
+                                        .color(Color32::from_gray(180)),
+                                );
                                 ui.add_space(6.0);
 
                                 // ----- Username -----
@@ -387,35 +392,72 @@ impl eframe::App for GuiClientApp {
                                 ui.add_space(15.0);
 
                                 ui.add_space(4.0);
-                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Min), |ui| {
-                                    ui.add(
-                                        egui::Label::new(
-                                            RichText::new("To be registered, you need to be inserted in the server's database. contact a server admin")
+                                ui.with_layout(
+                                    egui::Layout::left_to_right(egui::Align::Min),
+                                    |ui| {
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(
+                                                    "To register, right click the Connect button",
+                                                )
                                                 .size(12.0)
                                                 .weak()
                                                 .color(Color32::from_gray(150))
                                                 .italics(),
-                                        )
-                                        .wrap(false), // prevents wrapping and keeps height minimal
-                                    );
-                                });
+                                            )
+                                            .wrap(false), // prevents wrapping and keeps height minimal
+                                        );
+                                    },
+                                );
                                 ui.add_space(6.0);
 
                                 // ----- Connect Button -----
                                 let connect_size = [150.0, 32.0];
                                 let connect_color = Color32::from_rgb(60, 120, 240); // clean blue
-                                if ui
-                                    .add_sized(
-                                        connect_size,
-                                        egui::Button::new(
-                                            RichText::new("Connect").strong().color(Color32::WHITE),
-                                        )
-                                        .fill(connect_color)
-                                        .stroke(egui::Stroke::new(1.0, Color32::BLACK))
-                                        .rounding(6.0),
+
+                                let btn = ui.add_sized(
+                                    connect_size,
+                                    egui::Button::new(
+                                        RichText::new("Connect").strong().color(Color32::WHITE),
                                     )
-                                    .clicked()
-                                {
+                                    .fill(connect_color)
+                                    .stroke(egui::Stroke::new(1.0, Color32::BLACK))
+                                    .rounding(6.0),
+                                );
+                                btn.context_menu(|ui| {
+                                    if ui.button("Register instead").clicked() {
+                                        match ClientState::new(
+                                            &self.address,
+                                            &self.phrase.clone().into_bytes(),
+                                            self.username.clone(),
+                                            self.password.clone(),
+                                        ) {
+                                            Ok(state) => {
+                                                self.socket = Some(state.socket.clone());
+                                                let arc_state = Arc::new(Mutex::new(state));
+                                                let thread_state = arc_state.clone();
+                                                let username = self.username.clone();
+                                                let password = self.password.clone();
+
+                                                std::thread::spawn(move || {
+                                                    thread_state
+                                                        .lock()
+                                                        .unwrap()
+                                                        .register(&username, &password);
+                                                });
+                                            }
+                                            Err(e) => {
+                                                self.error.show = ShowMode::ShowError;
+                                                self.error.message = format!(
+                                                    "Failed to connect to the server: {}",
+                                                    e
+                                                );
+                                            }
+                                        }
+                                    }
+                                });
+
+                                if btn.clicked() {
                                     // Try to connect
                                     match ClientState::new(
                                         &self.address,
@@ -1322,14 +1364,14 @@ impl GuiClientApp {
     }
 
     fn join_channel(&self, id: u32) {
-        // if let Some(client) = &self.client
-        //     && let Err(e) = client.lock().unwrap().join(id)
-        // {
-        //     eprintln!(
-        //         "we faced an error when trying to join channel {}: {}",
-        //         id, e
-        //     );
-        // }
+        if let Some(client) = &self.client
+            && let Err(e) = client.lock().unwrap().join(id)
+        {
+            eprintln!(
+                "we faced an error when trying to join channel {}: {}",
+                id, e
+            );
+        }
 
         self.request_global_list();
     }

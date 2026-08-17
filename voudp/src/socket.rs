@@ -103,6 +103,10 @@ impl SecureUdpSocket {
         }
     }
 
+    pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
+        self.inner.socket.set_nonblocking(nonblocking)
+    }
+
     pub fn send(&self, buf: &[u8]) -> io::Result<usize> {
         let addr =
             self.inner.connected_addr.lock().unwrap().ok_or_else(|| {
