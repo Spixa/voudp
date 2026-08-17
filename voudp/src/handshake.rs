@@ -33,6 +33,7 @@ pub enum HandshakeStep {
 
     // HandshakeFail = 0xfe,
     RegisterFail = 0xff,
+    RegistrationClosed = 0xfd,
     Done = 0x00,
 }
 
@@ -48,6 +49,7 @@ impl TryFrom<u8> for HandshakeStep {
             0x03 => Ok(Self::RegisterRequest),
             0x04 => Ok(Self::RegisterResponse),
             0xff => Ok(Self::RegisterFail),
+            0xfd => Ok(Self::RegistrationClosed),
             0x00 => Ok(Self::Done),
             _ => Err(value),
         }
@@ -97,6 +99,7 @@ pub enum RegisterMessage {
         signature: [u8; 64],
     },
     AlreadyExists,
+    RegistrationClosed,
 }
 
 pub const STEP_CLIENT_HELLO: u8 = 1;
@@ -108,6 +111,7 @@ pub const STEP_REGISTER_REQUEST: u8 = 3;
 pub const STEP_REGISTER_RESPONSE: u8 = 4;
 
 pub const REGISTER_FAILED: u8 = 0xff;
+pub const REGISTER_CLOSED: u8 = 0xfd;
 
 pub const CLIENT_HELLO_SIZE: usize = 1 + 16 + 32 + 32; // step + session_id + c_nonce + username
 pub const SERVER_HELLO_SIZE: usize = 1 + 16 + 32 + 32 + 16 + 32 + 64; // step + sid + s_nonce + e_pub_s + salt + pub + sig
@@ -152,6 +156,7 @@ impl RegisterMessage {
                 buf
             }
             RegisterMessage::AlreadyExists => vec![REGISTER_FAILED],
+            RegisterMessage::RegistrationClosed => vec![REGISTER_CLOSED],
         }
     }
 
@@ -214,6 +219,7 @@ impl RegisterMessage {
                 })
             }
             REGISTER_FAILED => Ok(RegisterMessage::AlreadyExists),
+            REGISTER_CLOSED => Ok(RegisterMessage::RegistrationClosed),
             _ => Err("Not a register packet"),
         }
     }
@@ -467,6 +473,10 @@ impl ClientHandshake {
         let mut buf = [0u8; 2048];
         let len;
         loop {
+            if self.is_expired() {
+                return Err(io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"));
+            }
+
             match socket.recv_from(&mut buf) {
                 Ok((l, _)) => {
                     if l != 0 {
@@ -477,6 +487,8 @@ impl ClientHandshake {
                 Err((e, _)) if e.kind() == io::ErrorKind::WouldBlock => {}
                 Err((e, _)) => return Err(e),
             }
+
+            std::thread::sleep(Duration::from_millis(2));
         }
         let resp = RegisterMessage::decode(&buf[1..len]).map_err(|e| io::Error::other(e))?;
 
@@ -536,6 +548,10 @@ impl ClientHandshake {
                 Err(io::Error::other(
                     "As it turns out, that user is already in the database",
                 ))
+            }
+            RegisterMessage::RegistrationClosed => {
+                eprintln!("[voudp tls] FAIL registration is closed on this server");
+                Err(io::Error::other("Server is not registering new users"))
             }
             _ => return Err(io::Error::other("invalid register message")),
         }
@@ -748,6 +764,6 @@ impl ClientHandshake {
     }
 
     pub fn is_expired(&self) -> bool {
-        self.start_time.elapsed() > std::time::Duration::from_secs(10)
+        self.start_time.elapsed() > std::time::Duration::from_secs(5)
     }
 }

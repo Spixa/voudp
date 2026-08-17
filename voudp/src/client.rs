@@ -41,6 +41,14 @@ pub struct AudioDevices {
     pub output: String,
 }
 
+pub enum RegisterState {
+    HasntBegun,
+    Registering,
+    RegisterError,
+    RegisterSuccess,
+    TimedOut,
+}
+
 pub struct ClientState {
     pub socket: SecureUdpSocket,
     muted: Arc<AtomicBool>,
@@ -55,6 +63,7 @@ pub struct ClientState {
     pub devices: Arc<Mutex<AudioDevices>>,
     pub glitter: Arc<AtomicBool>,
     pub handshake: Arc<Mutex<ClientHandshake>>,
+    pub register_state: RegisterState,
 }
 
 type OwnedMessage = (Message, DateTime<Local>);
@@ -119,6 +128,7 @@ impl ClientState {
             devices: Arc::new(Mutex::new(AudioDevices::default())),
             glitter: Arc::new(AtomicBool::new(false)),
             handshake,
+            register_state: RegisterState::HasntBegun,
         })
     }
 
@@ -180,13 +190,21 @@ impl ClientState {
         Ok(())
     }
 
-    pub fn register(&self, username: &String, password: &String) {
+    pub fn register(&mut self, username: &String, password: &String) {
         let pub_bytes = Self::load_pinned_public_key_from_pem("server_public.pem").unwrap();
         let pin = sha256(&pub_bytes);
 
         let mut handshake = self.handshake.lock().unwrap();
         if let Err(e) = handshake.register_handshake(&self.socket, username, password, &pin) {
+            if e.kind() == io::ErrorKind::TimedOut {
+                self.register_state = RegisterState::TimedOut;
+                return;
+            }
+
+            self.register_state = RegisterState::RegisterError;
             eprintln!("{}", e);
+        } else {
+            self.register_state = RegisterState::RegisterSuccess;
         }
     }
 

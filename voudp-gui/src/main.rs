@@ -9,7 +9,7 @@ use rand::Rng;
 
 use std::{
     fs::File,
-    io::{self, Read, Write},
+    io::{self, Write},
     sync::{Arc, Mutex, RwLock, atomic::Ordering, mpsc::TryRecvError},
     thread::{self, JoinHandle},
     time::{Duration, Instant},
@@ -61,6 +61,7 @@ struct GuiClientApp {
     input: String,
     username: String,
     password: String,
+    info_text: String,
     logs: LogVec,
     show_command_suggestions: bool,
     selected_suggestion: usize,
@@ -129,8 +130,9 @@ impl Default for GuiClientApp {
             error: Default::default(),
             logs: Default::default(),
             input: Default::default(),
-            username: Default::default(),
+            username,
             password: Default::default(),
+            info_text: String::from("To register, right click the Connect button"),
             show_command_suggestions: false,
             selected_suggestion: 0,
             filter_text: String::new(),
@@ -186,6 +188,7 @@ impl eframe::App for GuiClientApp {
 
                                 if back.clicked() || ui.input(|i| i.key_pressed(egui::Key::Escape))
                                 {
+                                    {}
                                     self.error.show = ShowMode::DontShow;
                                 }
                             },
@@ -287,6 +290,42 @@ impl eframe::App for GuiClientApp {
         }
 
         if !self.is_connected {
+            {
+                let mut delete = false;
+                if let Some(client) = &self.client {
+                    let c = client.lock().unwrap();
+
+                    match c.register_state {
+                        client::RegisterState::RegisterError => {
+                            self.info_text = format!(
+                                "Could not register {}! Either the username is taken, or registration is closed.",
+                                self.username
+                            );
+                            self.error.message = "Failed to register, maybe username is taken, or registration is closed.".into();
+                            delete = true;
+                        }
+                        client::RegisterState::RegisterSuccess => {
+                            self.info_text = format!("Successfully registered {}!", self.username);
+                            delete = true;
+                        }
+                        client::RegisterState::HasntBegun => {
+                            self.info_text = "To register, right click the Connect button 1".into();
+                        }
+                        client::RegisterState::Registering => {
+                            self.info_text = "Handshake in process..".into();
+                        }
+                        client::RegisterState::TimedOut => {
+                            self.info_text = format!("Handshake with {} timed out. Maybe server is unreachable, or PSK is incorrect", self.address);
+                        }
+                    }
+                }
+
+                if delete {
+                    self.client = None;
+                    self.client_thread = None;
+                }
+            }
+
             egui::CentralPanel::default().show(ctx, |ui| {
                 let available = ui.available_size();
                 ui.vertical_centered(|ui| {
@@ -397,13 +436,10 @@ impl eframe::App for GuiClientApp {
                                     |ui| {
                                         ui.add(
                                             egui::Label::new(
-                                                RichText::new(
-                                                    "To register, right click the Connect button",
-                                                )
-                                                .size(12.0)
-                                                .weak()
-                                                .color(Color32::from_gray(150))
-                                                .italics(),
+                                                RichText::new(self.info_text.clone())
+                                                    .size(12.0)
+                                                    .weak()
+                                                    .color(Color32::LIGHT_GREEN),
                                             )
                                             .wrap(false), // prevents wrapping and keeps height minimal
                                         );
@@ -425,7 +461,9 @@ impl eframe::App for GuiClientApp {
                                     .rounding(6.0),
                                 );
                                 btn.context_menu(|ui| {
-                                    if ui.button("Register instead").clicked() {
+                                    if ui.button("Register instead").clicked()
+                                        && !self.username.is_empty()
+                                    {   
                                         match ClientState::new(
                                             &self.address,
                                             &self.phrase.clone().into_bytes(),
@@ -439,12 +477,15 @@ impl eframe::App for GuiClientApp {
                                                 let username = self.username.clone();
                                                 let password = self.password.clone();
 
-                                                std::thread::spawn(move || {
+                                                let handle = std::thread::spawn(move || {
                                                     thread_state
                                                         .lock()
                                                         .unwrap()
                                                         .register(&username, &password);
                                                 });
+
+                                                self.client_thread = Some(handle);
+                                                self.client = Some(arc_state);
                                             }
                                             Err(e) => {
                                                 self.error.show = ShowMode::ShowError;

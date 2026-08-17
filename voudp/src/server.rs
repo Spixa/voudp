@@ -903,7 +903,8 @@ impl ServerState {
             old_channel.remove_remote(&addr);
         }
 
-        self.broadcast_join(chan_id, username);
+        self.broadcast_leave(old_channel_id, &username);
+        self.broadcast_join(chan_id, &username);
 
         // add to new channel
         let channel = self
@@ -1383,8 +1384,33 @@ impl ServerState {
         }
     }
 
-    fn broadcast_join(&mut self, channel_id: u32, mask: String) {
+    fn broadcast_join(&mut self, channel_id: u32, mask: &String) {
         self.broadcast_join_masked(channel_id, mask, None);
+    }
+
+    fn broadcast_leave(&mut self, channel_id: u32, username: &String) {
+        let peer_addresses: Vec<SocketAddr> = if let Some(channel) = self.channels.get(&channel_id)
+        {
+            channel
+                .remotes
+                .iter()
+                .map(|r| r.lock().unwrap().addr)
+                .collect()
+        } else {
+            Vec::new()
+        };
+
+        let packet = {
+            let mut packet = vec![ClientPacketType::FlowLeave as u8];
+            packet.extend_from_slice(username.as_bytes());
+            packet
+        };
+
+        for peer_addr in peer_addresses {
+            if let Err(e) = self.socket.send_reliable(packet.clone(), peer_addr) {
+                warn!("Failed to send mask packet to {}: {:?}", peer_addr, e);
+            }
+        }
     }
 
     fn kick_socket(&mut self, addr: SocketAddr, reason: Option<String>) {
@@ -1438,7 +1464,7 @@ impl ServerState {
     fn broadcast_join_masked(
         &mut self,
         channel_id: u32,
-        new_mask: String,
+        new_mask: &String,
         old_mask: Option<String>,
     ) {
         let peer_addresses: Vec<SocketAddr> = if let Some(channel) = self.channels.get(&channel_id)
