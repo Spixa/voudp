@@ -474,7 +474,10 @@ impl ClientHandshake {
         let len;
         loop {
             if self.is_expired() {
-                return Err(io::Error::new(io::ErrorKind::TimedOut, "handshake timed out"));
+                return Err(io::Error::new(
+                    io::ErrorKind::TimedOut,
+                    "handshake timed out",
+                ));
             }
 
             match socket.recv_from(&mut buf) {

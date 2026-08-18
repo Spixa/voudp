@@ -875,18 +875,18 @@ impl ServerState {
         }
 
         info!("{} has joined the channel with id {}", addr, chan_id);
-        // {
-        //     let remote = remote.lock().unwrap();
+        {
+            let username = remote.lock().unwrap().username.clone();
 
-        //     if !self.plugin_manager.dispatch_join(addr, chan_id) {
-        //         info!("Plugins prevented {addr} from joining");
-        //         self.kick_socket(
-        //             addr,
-        //             Some("Server plugins blocked you from joining".to_owned()),
-        //         );
-        //         return;
-        //     }
-        // }
+            if !self.plugin_manager.dispatch_join(addr, username, chan_id) {
+                info!("Plugins prevented {addr} from joining");
+                self.kick_socket(
+                    addr,
+                    Some("Server plugins blocked you from joining".to_owned()),
+                );
+                return;
+            }
+        }
 
         let (old_channel_id, username) = {
             let mut remote_guard = remote.lock().unwrap();

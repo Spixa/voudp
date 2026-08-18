@@ -315,7 +315,10 @@ impl eframe::App for GuiClientApp {
                             self.info_text = "Handshake in process..".into();
                         }
                         client::RegisterState::TimedOut => {
-                            self.info_text = format!("Handshake with {} timed out. Maybe server is unreachable, or PSK is incorrect", self.address);
+                            self.info_text = format!(
+                                "Handshake with {} timed out. Maybe server is unreachable, or PSK is incorrect",
+                                self.address
+                            );
                         }
                     }
                 }
@@ -463,7 +466,7 @@ impl eframe::App for GuiClientApp {
                                 btn.context_menu(|ui| {
                                     if ui.button("Register instead").clicked()
                                         && !self.username.is_empty()
-                                    {   
+                                    {
                                         match ClientState::new(
                                             &self.address,
                                             &self.phrase.clone().into_bytes(),

@@ -465,6 +465,8 @@ impl ClientState {
                 break;
             }
 
+            socket.tick_reliable();
+
             // send periodic requests
             if test.elapsed() > Duration::from_secs(1) {
                 socket.send(&protocol::create_list_request()).unwrap();

@@ -24,4 +24,8 @@ function on_join(ctx)
     if Core.starts_with(ctx:get_addr(), Core.LOOPBACK) then
         Core.info(ctx:get_addr() .. " connected from loopback")
     end
+
+    if ctx:get_username() == "spixa" or ctx:get_username() == "vivian" or ctx:get_username() == "kasra" then
+        Core.info("yes")
+    end
 end

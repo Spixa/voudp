@@ -42,6 +42,7 @@ pub struct PluginMetadata {
 
 pub struct JoinContext {
     pub addr: SocketAddr,
+    pub username: String,
     pub channel_id: u32,
     cancelled: Arc<AtomicBool>,
     tx: Sender<PluginAction>,
@@ -55,7 +56,8 @@ impl UserData for JoinContext {
                 .ok();
             Ok(())
         });
-        methods.add_method("get_addr", |_, ctx, ()| Ok(ctx.addr.to_string().clone()));
+        methods.add_method("get_username", |_, ctx, ()| Ok(ctx.username.clone()));
+        methods.add_method("get_addr", |_, ctx, ()| Ok(ctx.addr.to_string()));
         methods.add_method("get_channel_id", |_, ctx, ()| {
             Ok(ctx.channel_id.to_string())
         });
@@ -286,7 +288,7 @@ impl PluginManager {
         }
     }
 
-    pub fn dispatch_join(&self, addr: SocketAddr, channel_id: u32) -> bool {
+    pub fn dispatch_join(&self, addr: SocketAddr, username: String, channel_id: u32) -> bool {
         let cancelled = Arc::new(AtomicBool::new(false)); // joining isnt cancelled by default
 
         for plugin in &self.plugins {
@@ -302,6 +304,7 @@ impl PluginManager {
                 let ctx = JoinContext {
                     addr,
                     channel_id,
+                    username: username.clone(),
                     cancelled: cancelled.clone(),
                     tx: self.sender.clone(),
                 };
