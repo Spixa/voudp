@@ -190,7 +190,7 @@ impl ClientState {
         Ok(())
     }
 
-    pub fn register(&mut self, username: &String, password: &String) {
+    pub fn register(&mut self, username: &str, password: &str) {
         let pub_bytes = Self::load_pinned_public_key_from_pem("server_public.pem").unwrap();
         let pin = sha256(&pub_bytes);
 
@@ -438,9 +438,9 @@ impl ClientState {
         let mut decoder = Decoder::new(48000, Channels::Stereo).unwrap();
 
         encoder.set_inband_fec(true).unwrap();
-        encoder.set_bitrate(opus2::Bitrate::Bits(96000)).unwrap();
+        encoder.set_bitrate(opus2::Bitrate::Bits(64000)).unwrap();
         encoder.set_vbr(true).unwrap();
-        encoder.set_packet_loss_perc(10).unwrap();
+        encoder.set_packet_loss_perc(25).unwrap();
 
         let mut recv_buf = [0u8; 2048];
         let mut frame_buf = vec![0.0f32; TARGET_FRAME_SIZE * 2];

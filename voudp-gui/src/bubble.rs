@@ -80,7 +80,7 @@ pub fn badge(ui: &mut egui::Ui, text: impl Into<String>, color: egui::Color32) {
         .strong();
 
     egui::Frame::none()
-        .fill(color.gamma_multiply(0.15))
+        .fill(ui.ctx().style().visuals.faint_bg_color)
         .rounding(6.0)
         .inner_margin(egui::Margin::symmetric(6.0, 2.0))
         .show(ui, |ui| {

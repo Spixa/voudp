@@ -15,7 +15,7 @@ pub fn register_user(username: &str, password: &[u8]) -> io::Result<()> {
     let salt = rand::random::<[u8; 16]>();
     let hash = slow_hash(password, &salt);
 
-    db::create_user(&username, &salt, &hash)
+    db::create_user(username, &salt, &hash)
 }
 
 #[repr(u8)]
@@ -493,7 +493,7 @@ impl ClientHandshake {
 
             std::thread::sleep(Duration::from_millis(2));
         }
-        let resp = RegisterMessage::decode(&buf[1..len]).map_err(|e| io::Error::other(e))?;
+        let resp = RegisterMessage::decode(&buf[1..len]).map_err(io::Error::other)?;
 
         match resp {
             RegisterMessage::Response {
@@ -517,7 +517,7 @@ impl ClientHandshake {
                 }
 
                 let verify_key =
-                    VerifyingKey::from_bytes(&server_pub_bytes).map_err(|e| io::Error::other(e))?;
+                    VerifyingKey::from_bytes(&server_pub_bytes).map_err(io::Error::other)?;
                 let msg_to_verify = [
                     c_nonce_local.as_ref(),
                     s_nonce.as_ref(),
@@ -527,7 +527,7 @@ impl ClientHandshake {
                 .concat();
                 verify_key
                     .verify(&msg_to_verify, &Signature::from_bytes(&signature))
-                    .map_err(|e| io::Error::other(e))?;
+                    .map_err(io::Error::other)?;
 
                 let expected = sha256(
                     &[
@@ -556,7 +556,7 @@ impl ClientHandshake {
                 eprintln!("[voudp tls] FAIL registration is closed on this server");
                 Err(io::Error::other("Server is not registering new users"))
             }
-            _ => return Err(io::Error::other("invalid register message")),
+            _ => Err(io::Error::other("invalid register message")),
         }
     }
 
@@ -727,6 +727,7 @@ impl ClientHandshake {
 
                 println!("[voudp tls] derived inner AEAD session key using HKDF");
                 self.key = Some(session_key);
+                socket.set_session_key(self.server_addr, session_key);
 
                 self.step = HandshakeStep::Done;
                 println!(
@@ -748,8 +749,7 @@ impl ClientHandshake {
 
     pub fn session_key(&self) -> Result<Key, io::Error> {
         if !self.is_done() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
+            return Err(io::Error::other(
                 "handshake not completed, session key unavailable",
             ));
         }

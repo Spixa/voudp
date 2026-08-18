@@ -1,4 +1,3 @@
-use chacha20poly1305::{ChaCha20Poly1305, Key, KeyInit};
 use ed25519_dalek::{Signer, SigningKey, pkcs8::DecodePrivateKey};
 use log::{error, info, warn};
 use opus2::{Application, Channels as OpusChannels, Decoder, Encoder};
@@ -105,30 +104,22 @@ pub struct Remote {
     jitter_buffer: VecDeque<Vec<f32>>,
     pub(crate) status: RemoteStatus,
     pub(crate) volume_settings: HashMap<String, f32>,
-    pub(crate) session_cipher: ChaCha20Poly1305,
 }
 
 impl Remote {
-    fn new(
-        addr: SocketAddr,
-        sample_rate: u32,
-        session_key: Key,
-        username: String,
-    ) -> Result<Self, opus2::Error> {
+    fn new(addr: SocketAddr, sample_rate: u32, username: String) -> Result<Self, opus2::Error> {
         let mut encoder = Encoder::new(sample_rate, OpusChannels::Stereo, Application::Audio)?;
         let decoder = Decoder::new(sample_rate, OpusChannels::Stereo)?;
 
         encoder.set_inband_fec(true)?;
-        encoder.set_bitrate(opus2::Bitrate::Bits(96000))?;
+        encoder.set_bitrate(opus2::Bitrate::Bits(64000))?;
         encoder.set_vbr(true)?;
-        encoder.set_packet_loss_perc(10)?;
+        encoder.set_packet_loss_perc(25)?;
 
         info!(
             "New remote has initialized with addr {} (sample rate: {}, audio: {})",
             addr, sample_rate, "Stereo"
         );
-
-        let session_cipher = ChaCha20Poly1305::new(&session_key);
 
         Ok(Self {
             encoder,
@@ -137,7 +128,6 @@ impl Remote {
             channel_id: 0,
             addr,
             username,
-            session_cipher,
             jitter_buffer: VecDeque::with_capacity(JITTER_BUFFER_LEN),
             status: Default::default(),
             volume_settings: HashMap::new(),
@@ -227,7 +217,7 @@ impl Channel {
                 .remotes
                 .iter()
                 .find(|r| r.lock().unwrap().addr == *addr)
-                .and_then(|r| Some(r.lock().unwrap().username.clone()));
+                .map(|r| r.lock().unwrap().username.clone());
 
             processed_buffers.insert(*addr, (processed, speaker_username));
         }
@@ -693,7 +683,7 @@ impl ServerState {
     }
 
     fn handle_handshake(&mut self, addr: SocketAddr, data: &[u8]) {
-        if data.len() < 1 {
+        if data.is_empty() {
             return;
         }
 
@@ -839,10 +829,12 @@ impl ServerState {
                     self.remotes.insert(
                         addr,
                         Arc::new(Mutex::new(
-                            Remote::new(addr, self.config.sample_rate, session_key, username)
+                            Remote::new(addr, self.config.sample_rate, username)
                                 .expect("remote creation failed"),
                         )),
                     );
+
+                    self.socket.set_session_key(addr, session_key);
                 } else {
                     warn!(
                         "{addr} tried sending credentials while not being part of the unauth map"
@@ -966,6 +958,7 @@ impl ServerState {
 
                     channel.remove_remote(&addr);
                 } // if this is false, the remote is channel-less which i don't know how that would even happen
+                self.socket.clear_session_key(addr);
                 return false;
             }
             true
@@ -1159,7 +1152,7 @@ impl ServerState {
         let sender_addr = addr;
         if self
             .plugin_manager
-            .dispatch_message(&username.as_str(), msg.as_str())
+            .dispatch_message(username.as_str(), msg.as_str())
             .not()
         {
             info!("Plugins have prevented {username} from sending '{msg}'");
@@ -1542,6 +1535,7 @@ impl ServerState {
 
                     channel.remove_remote(addr);
                 } // if this is false, the remote is channel-less which i don't know how that would even happen
+                self.socket.clear_session_key(*addr);
                 false // remote hasn't updated in the past N seconds, needs to be kicked
             } else {
                 true // remote can stay alive

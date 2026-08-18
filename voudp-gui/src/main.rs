@@ -4,7 +4,7 @@ use anyhow::Result;
 use chrono::{DateTime, Local};
 use core::f32;
 use eframe::{NativeOptions, egui};
-use egui::{Color32, Id, RichText, Stroke};
+use egui::{Color32, Id, RichText};
 use rand::Rng;
 
 use std::{
@@ -145,6 +145,8 @@ impl Default for GuiClientApp {
 }
 impl eframe::App for GuiClientApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        catppuccin_egui::set_theme(ctx, catppuccin_egui::MACCHIATO);
+
         match self.error.show {
             ShowMode::ShowError => {
                 egui::Window::new("Connection Error")
@@ -159,15 +161,6 @@ impl eframe::App for GuiClientApp {
                             .inner_margin(egui::Margin::symmetric(18.0, 16.0)),
                     )
                     .show(ctx, |ui| {
-                        ui.vertical_centered(|ui| {
-                            ui.heading(
-                                egui::RichText::new("Connection Error")
-                                    .color(egui::Color32::LIGHT_RED),
-                            );
-                        });
-
-                        ui.add_space(10.0);
-                        ui.separator();
                         ui.add_space(10.0);
 
                         ui.label(
@@ -336,7 +329,7 @@ impl eframe::App for GuiClientApp {
 
                     // ===== Main card =====
                     egui::Frame::none()
-                        .fill(Color32::from_rgb(40, 45, 50)) // dark card
+                        .fill(ctx.style().visuals.extreme_bg_color) // dark card
                         .stroke(egui::Stroke::new(1.0, Color32::from_gray(60))) // subtle border
                         .rounding(10.0)
                         .inner_margin(egui::Margin::symmetric(20.0, 20.0))
@@ -354,7 +347,7 @@ impl eframe::App for GuiClientApp {
                                         .desired_width(220.0)
                                         .frame(false);
                                     egui::Frame::none()
-                                        .fill(Color32::from_gray(30))
+                                        .fill(ctx.style().visuals.code_bg_color)
                                         .stroke(egui::Stroke::new(1.0, Color32::GRAY))
                                         .rounding(6.0)
                                         .inner_margin(egui::Margin::symmetric(6.0, 4.0))
@@ -374,7 +367,7 @@ impl eframe::App for GuiClientApp {
                                         .desired_width(220.0)
                                         .frame(false);
                                     egui::Frame::none()
-                                        .fill(Color32::from_gray(30))
+                                        .fill(ctx.style().visuals.code_bg_color)
                                         .stroke(egui::Stroke::new(1.0, Color32::GRAY))
                                         .rounding(6.0)
                                         .inner_margin(egui::Margin::symmetric(6.0, 4.0))
@@ -403,7 +396,7 @@ impl eframe::App for GuiClientApp {
                                         .desired_width(220.0)
                                         .frame(false);
                                     egui::Frame::none()
-                                        .fill(Color32::from_gray(30))
+                                        .fill(ctx.style().visuals.code_bg_color)
                                         .stroke(egui::Stroke::new(1.0, Color32::GRAY))
                                         .rounding(6.0)
                                         .inner_margin(egui::Margin::symmetric(6.0, 4.0))
@@ -423,7 +416,7 @@ impl eframe::App for GuiClientApp {
                                         .desired_width(220.0)
                                         .frame(false);
                                     egui::Frame::none()
-                                        .fill(Color32::from_gray(30))
+                                        .fill(ctx.style().visuals.code_bg_color)
                                         .stroke(egui::Stroke::new(1.0, Color32::GRAY))
                                         .rounding(6.0)
                                         .inner_margin(egui::Margin::symmetric(6.0, 4.0))
@@ -979,8 +972,8 @@ impl eframe::App for GuiClientApp {
                             if is_system {
                                 ui.vertical_centered(|ui| {
                                     let frame = egui::Frame::default()
-                                        .fill(egui::Color32::from_gray(32)) // dark
-                                        .rounding(egui::Rounding::same(8.0))
+                                        .fill(ui.ctx().style().visuals.extreme_bg_color) // dark
+                                        .rounding(ui.ctx().style().visuals.window_rounding)
                                         .inner_margin(egui::Margin::symmetric(12.0, 6.0))
                                         .outer_margin(egui::Margin::symmetric(0.0, 4.0));
 
@@ -991,8 +984,10 @@ impl eframe::App for GuiClientApp {
                                         if let Some((src, content)) = parse_system_message(msg) {
                                             ui.horizontal(|ui| {
                                                 let title_badge = egui::Frame::default()
-                                                    .fill(egui::Color32::from_gray(48))
-                                                    .rounding(egui::Rounding::same(12.0))
+                                                    .fill(ui.ctx().style().visuals.code_bg_color)
+                                                    .rounding(
+                                                        ui.ctx().style().visuals.menu_rounding,
+                                                    )
                                                     .inner_margin(egui::Margin::symmetric(
                                                         8.0, 2.0,
                                                     ));
@@ -1168,7 +1163,7 @@ impl eframe::App for GuiClientApp {
 
                             // --- Send button ---
                             let send_button_size = [70.0, 28.0];
-                            let send_color = Color32::from_gray(70);
+                            let send_color = ctx.style().visuals.code_bg_color;
 
                             if ui
                                 .add_sized(
@@ -1177,7 +1172,7 @@ impl eframe::App for GuiClientApp {
                                         RichText::new("Send").strong().color(Color32::WHITE),
                                     )
                                     .fill(send_color)
-                                    .stroke(Stroke::new(1.0, Color32::BLACK))
+                                    .stroke(ctx.style().visuals.window_stroke)
                                     .rounding(6.0),
                                 )
                                 .clicked()

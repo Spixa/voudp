@@ -42,6 +42,52 @@ pub fn derive_session_key(shared: &[u8; 32], c_nonce: &[u8; 32], s_nonce: &[u8; 
     Key::from_slice(&key_b).to_owned()
 }
 
+struct SessionCipher {
+    cipher: ChaCha20Poly1305,
+    nonce_prefix: [u8; 4],
+    nonce_counter: AtomicU64,
+}
+
+impl SessionCipher {
+    fn new(key: Key) -> Self {
+        let mut nonce_prefix = [0u8; 4];
+        OsRng.fill_bytes(&mut nonce_prefix);
+        Self {
+            cipher: ChaCha20Poly1305::new(&key),
+            nonce_prefix,
+            nonce_counter: AtomicU64::new(0),
+        }
+    }
+
+    fn encrypt(&self, plaintext: &[u8]) -> io::Result<Vec<u8>> {
+        let counter = self.nonce_counter.fetch_add(1, Ordering::Relaxed);
+        let mut nonce_bytes = [0u8; 12];
+        nonce_bytes[..4].copy_from_slice(&self.nonce_prefix);
+        nonce_bytes[4..].copy_from_slice(&counter.to_be_bytes());
+        let ciphertext = self
+            .cipher
+            .encrypt(Nonce::from_slice(&nonce_bytes), plaintext)
+            .map_err(|_| io::Error::other("inner encryption failure"))?;
+        let mut out = Vec::with_capacity(12 + ciphertext.len());
+        out.extend_from_slice(&nonce_bytes);
+        out.extend_from_slice(&ciphertext);
+        Ok(out)
+    }
+
+    fn decrypt(&self, data: &[u8]) -> io::Result<Vec<u8>> {
+        if data.len() < 12 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "inner packet too small",
+            ));
+        }
+        let (nonce_bytes, ciphertext) = data.split_at(12);
+        self.cipher
+            .decrypt(Nonce::from_slice(nonce_bytes), ciphertext)
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "inner decryption failure"))
+    }
+}
+
 struct PendingPacket {
     data: Vec<u8>,
     addr: SocketAddr,
@@ -57,6 +103,7 @@ struct InnerSocket {
     nonce_counter: AtomicU64,
     nonce_prefix: [u8; 4],
     connected_addr: Mutex<Option<SocketAddr>>,
+    session_ciphers: Mutex<HashMap<SocketAddr, Arc<SessionCipher>>>,
 }
 
 #[derive(Clone)]
@@ -81,6 +128,7 @@ impl SecureUdpSocket {
                 pending: Mutex::new(HashMap::new()),
                 nonce_counter: AtomicU64::new(0),
                 nonce_prefix,
+                session_ciphers: Mutex::new(HashMap::new()),
                 connected_addr: Mutex::new(None),
             }),
         })
@@ -101,6 +149,26 @@ impl SecureUdpSocket {
                 "no valid IPv4 address found",
             ))
         }
+    }
+    pub fn set_session_key(&self, addr: SocketAddr, key: Key) {
+        self.inner
+            .session_ciphers
+            .lock()
+            .unwrap()
+            .insert(addr, Arc::new(SessionCipher::new(key)));
+    }
+
+    pub fn clear_session_key(&self, addr: SocketAddr) {
+        self.inner.session_ciphers.lock().unwrap().remove(&addr);
+    }
+
+    fn get_session(&self, addr: &SocketAddr) -> Option<Arc<SessionCipher>> {
+        self.inner
+            .session_ciphers
+            .lock()
+            .unwrap()
+            .get(addr)
+            .cloned()
     }
 
     pub fn set_nonblocking(&self, nonblocking: bool) -> io::Result<()> {
@@ -134,10 +202,18 @@ impl SecureUdpSocket {
         nonce_bytes[4..].copy_from_slice(&counter.to_be_bytes()); // 8-byte counter
         let nonce = Nonce::from_slice(&nonce_bytes);
 
+        let staged;
+        let outgoing: &[u8] = if let Some(session) = self.get_session(&addr) {
+            staged = session.encrypt(buf)?;
+            &staged
+        } else {
+            buf
+        };
+
         let ciphertext = self
             .inner
             .cipher
-            .encrypt(nonce, buf)
+            .encrypt(nonce, outgoing)
             .map_err(|_| io::Error::other("encryption failure"))?;
 
         let mut packet = Vec::with_capacity(12 + ciphertext.len());
@@ -196,7 +272,7 @@ impl SecureUdpSocket {
         let (nonce_bytes, ciphertext) = buf[..size].split_at(12);
         let nonce = Nonce::from_slice(nonce_bytes);
 
-        let plaintext = match self.inner.cipher.decrypt(nonce, ciphertext) {
+        let mut plaintext = match self.inner.cipher.decrypt(nonce, ciphertext) {
             Ok(pt) => pt,
             Err(_) => {
                 return Err((
@@ -205,6 +281,10 @@ impl SecureUdpSocket {
                 ));
             }
         };
+
+        if let Some(session) = self.get_session(&addr) {
+            plaintext = session.decrypt(&plaintext).map_err(|e| (e, addr))?;
+        }
 
         // ACK handling
         if plaintext.len() == 5 && plaintext[0] == ACK_FLAG {
@@ -252,7 +332,7 @@ impl SecureUdpSocket {
             }
 
             if now.duration_since(pkt.last_sent) >= timeout {
-                let _ = self.inner.socket.send_to(&pkt.data, pkt.addr);
+                let _ = self.send_to(&pkt.data, pkt.addr);
                 pkt.last_sent = now;
                 pkt.retries += 1;
             }
