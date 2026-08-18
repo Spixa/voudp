@@ -8,8 +8,8 @@ plugin = {
 
 -- configurations
 local server_name = "Another VoUDP Server"
-local welcome_msg = "Welcome to %s!\nServer time is %s\nMask yourself to be able to talk!"
-local only_general = true
+local welcome_msg = "Welcome to %s!\nServer time is %s"
+local only_general = false
 
 function on_join(ctx) 
     if only_general and ctx:get_channel_id() ~= "1" then
@@ -26,6 +26,6 @@ function on_join(ctx)
     end
 
     if ctx:get_username() == "spixa" or ctx:get_username() == "vivian" or ctx:get_username() == "kasra" then
-        Core.info("yes")
+        Core.info("wsg " .. ctx:get_username())
     end
 end
